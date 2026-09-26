@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "foamy.idle-suspend",
+  "name": "Foamy Idle Suspend",
+  "version": "1.0.0",
+  "author": "foamrider",
+  "description": "Configurable idle sleep policy for battery and AC power.",
+  "kinds": ["service"],
+  "keepLoaded": true,
+  "entryPoints": { "service": "Service.qml" },
+  "license": "MIT"
+}
