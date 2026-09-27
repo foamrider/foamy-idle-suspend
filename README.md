@@ -92,6 +92,11 @@ The machine must already support the selected action. This plugin does not
 configure swap, hibernation support, or systemd's hibernation delay. Failed
 sleep requests are reported in its status and shell logs.
 
+When the configured idle timeout expires, the plugin calls `systemctl` with
+the selected sleep action. Enabling the plugin enables this automatic policy;
+it does not ask for confirmation at each timeout. System authorization rules
+still apply to the sleep request.
+
 ### Applying settings
 
 Edits to `shell.json` reload automatically. Missing options use defaults;
@@ -138,6 +143,19 @@ system commands. It tests real Quickshell configuration watching and process
 handling, including invalid settings and failed sleep requests. It requires
 local IPC socket access and never suspends the machine. Actual compositor idle
 delivery and physical suspend/resume need separate validation on a target machine.
+
+## Remove
+
+```sh
+omarchy plugin remove foamy.idle-suspend
+```
+
+Removal stops this plugin's automatic sleep policy. Omarchy's stock lock and
+screensaver services remain responsible for their own timers. This does not
+undo an already requested sleep action or change systemd's sleep configuration.
+
+Omarchy manages the plugin entry in `shell.json`. Packages and data outside
+the plugin directory are retained unless you remove them separately.
 
 ## License
 
