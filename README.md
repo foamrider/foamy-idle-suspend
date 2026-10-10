@@ -36,7 +36,7 @@ containing only `"id": "foamy.idle-suspend"` has the same behavior.
 | --- | --- | --- |
 | `batteryTimeoutSec` | `900` | Idle seconds before sleeping while UPower reports battery power. |
 | `acTimeoutSec` | `null` | Idle seconds before sleeping while UPower reports AC power. |
-| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. Set `false` to allow desktops and other chassis types. |
+| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report a portable PC: `laptop`, `convertible` (2-in-1) or `tablet`. Set `false` to allow desktops and other chassis types. |
 | `suspendAction` | `"suspend-then-hibernate"` | The systemd sleep action to run when the active timeout expires. |
 
 For either timeout:

@@ -202,7 +202,7 @@ Item {
     }
     onExited: function(exitCode, exitStatus) {
       root.chassis = String(chassisOutput.text || "").trim() || "unknown"
-      root.isLaptop = exitCode === 0 && root.chassis === "laptop"
+      root.isLaptop = exitCode === 0 && Policy.isPortableChassis(root.chassis)
       root.chassisLoaded = true
       if (exitCode !== 0) {
         root.processError = String(chassisError.text || "hostnamectl chassis failed").trim()
