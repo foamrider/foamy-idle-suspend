@@ -54,6 +54,12 @@ test('Stay awake, unknown chassis, desktops and configuration errors block sleep
 });
 
 
+test('laptops, convertibles and tablets count as portable; other chassis do not', () => {
+  for (const chassis of ['laptop', 'convertible', 'tablet']) assert.equal(Policy.isPortableChassis(chassis), true);
+  for (const chassis of ['desktop', 'server', 'vm', 'container', 'handset', 'watch', 'embedded', 'unknown', '', 'Laptop'])
+    assert.equal(Policy.isPortableChassis(chassis), false);
+});
+
 test('null explicitly disables either timeout while omission retains its default', () => {
   const disabled = parse({ batteryTimeoutSec: null, acTimeoutSec: null });
   assert.equal(disabled.valid, true);

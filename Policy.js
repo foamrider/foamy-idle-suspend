@@ -42,8 +42,14 @@ function parseConfig(text) {
   }
 }
 
+// hostnamectl reports 2-in-1s as "convertible" (SMBIOS types 0x1F/0x20) and
+// slates as "tablet"; both are battery-powered like a "laptop".
+function isPortableChassis(chassis) {
+  return ["laptop", "convertible", "tablet"].indexOf(chassis) !== -1
+}
+
 function allowed(policy, configValid, chassisLoaded, isLaptop, idleEnabled) {
   return configValid && idleEnabled && (!policy.laptopsOnly || (chassisLoaded && isLaptop))
 }
 
-if (typeof module !== "undefined") module.exports = { defaults: defaults, parseConfig: parseConfig, allowed: allowed }
+if (typeof module !== "undefined") module.exports = { defaults: defaults, parseConfig: parseConfig, isPortableChassis: isPortableChassis, allowed: allowed }
