@@ -162,3 +162,5 @@ the plugin directory are retained unless you remove them separately.
 Licensed under [MIT](LICENSE).
 
 Provided **as is**, without warranty or guaranteed support. Use at your own risk.
+
+This background service has no translated user interface. It does not set or override the Omarchy language.
