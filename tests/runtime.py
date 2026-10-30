@@ -185,8 +185,33 @@ try:
     (base / 'block-inhibited').unlink()
     wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
     active()
+    # Power source changes while an attempt is locking: the new source's single
+    # idle notification must still lead to sleep once the old attempt ends.
+    write_config(acTimeoutSec=1)
+    wait_for(lambda s: s['policy']['acTimeoutSec'] == 1)
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: s['phase'] == 'locking')
+    ipc('test', 'state', False, True, False)
+    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=5)
+    assert status()['onBattery'] is False
+    active(False)
+    write_config()
+    wait_for(lambda s: s['policy']['acTimeoutSec'] is None)
     (base / 'lock-delay').unlink()
-    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking')
+    # Turning pauseForMedia off re-evaluates an attempt deferred for media.
+    ipc('test', 'playing', True)
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: s['deferredReason'] == 'media-playing')
+    write_config(pauseForMedia=False)
+    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    assert status()['mediaPlaying'] is True
+    active()
+    ipc('test', 'playing', False)
+    write_config()
+    wait_for(lambda s: s['policy']['pauseForMedia'] is True)
+    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep')
     # No secure lock, no sleep: notify once and retry while idle.
     (base / 'lock-reply').write_text('missing-pam')
     count = len(sleep_calls())

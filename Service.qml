@@ -46,6 +46,9 @@ Item {
   // inhibitors, suspending.
   property string phase: "idle"
   property string attemptSource: ""
+  // An idle request from the other power source that arrived while an
+  // attempt was running; its monitor fires only once, so it is kept.
+  property string pendingSource: ""
   property string deferredReason: ""
   property string lastLockResult: ""
   property string blockInhibited: ""
@@ -88,7 +91,7 @@ Item {
     notified = next
     Quickshell.execDetached([
       "notify-send", "-a", "Foamy Idle Suspend", "-u", urgency || "normal",
-      "-h", "string:omarchy-glyph:󰒲", title, body
+      "-h", "string:omarchy-glyph:\u{f04b2}", title, body
     ])
   }
 
@@ -98,6 +101,9 @@ Item {
       return
     }
     if (root.phase !== "idle") {
+      // A repeat for the same source is redundant; a request for the other
+      // source (power changed mid-attempt) runs once this attempt ends.
+      if (source !== root.attemptSource) root.pendingSource = source
       logEvent("suspend-skipped", "request already running")
       return
     }
@@ -201,6 +207,16 @@ Item {
   function finishAttempt(event, details) {
     root.phase = "idle"
     logEvent(event, details)
+    var pending = root.pendingSource
+    root.pendingSource = ""
+    if (pending && pending === currentSource()) Qt.callLater(resumeIfIdle)
+  }
+
+  // Start an attempt for the current power source if it is idle and nothing
+  // is running; requestSuspend re-checks everything else.
+  function resumeIfIdle() {
+    var source = currentSource()
+    if (root.phase === "idle" && monitorFor(source).isIdle) requestSuspend(source)
   }
 
   function scheduleRetry() {
@@ -242,7 +258,7 @@ Item {
     fallbackNotified = policy.suspendAction
     logEvent("action-fallback", policy.suspendAction + " unavailable, using suspend")
     Quickshell.execDetached([
-      "notify-send", "-a", "Foamy Idle Suspend", "-u", "normal", "-h", "string:omarchy-glyph:󰒲",
+      "notify-send", "-a", "Foamy Idle Suspend", "-u", "normal", "-h", "string:omarchy-glyph:\u{f04b2}",
       FoamyI18n.t("%1 isn't available", policy.suspendAction),
       FoamyI18n.t("Automatic sleep uses suspend instead. Set up hibernation or choose another suspendAction.")
     ])
@@ -271,7 +287,7 @@ Item {
     Quickshell.execDetached([
       "notify-send", "-a", "omarchy-action", "-u", "low",
       "-h", "boolean:transient:true",
-      "-h", "string:omarchy-glyph:" + (stayAwake ? "󰅶" : "󰾪"),
+      "-h", "string:omarchy-glyph:" + (stayAwake ? "\u{f0176}" : "\u{f0faa}"),
       stayAwake ? FoamyI18n.t("Stay awake enabled") : FoamyI18n.t("Stay awake disabled"),
       stayAwake
         ? FoamyI18n.t("Automatic sleep is paused")
@@ -350,6 +366,9 @@ Item {
     root.configuration = next
     root.logEvent(next.valid ? "config-ready" : "config-error", next.error)
     if (actionChanged) probeActions()
+    // A deferred attempt has no idle transition left to wake it; re-evaluate
+    // it under the new settings (for example pauseForMedia turned off).
+    if (root.deferredReason !== "") Qt.callLater(resumeIfIdle)
   }
 
   // Third-party service APIs do not expose plugins[] entries. Watch the same
