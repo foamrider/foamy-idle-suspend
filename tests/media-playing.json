@@ -1,0 +1,11 @@
+{
+  "contract": "Media is playing when any MPRIS player reports isPlaying === true (PlaybackStatus Playing). Paused, stopped and missing players do not count; metadata and browser filtering do not matter. Shared by foamy-lock (Model.mediaPlaying) and foamy-idle-suspend (Policy.mediaPlaying); keep this file identical in both repositories.",
+  "cases": [
+    {"players": [], "playing": false},
+    {"players": [null], "playing": false},
+    {"players": [{"isPlaying": false}], "playing": false},
+    {"players": [{"isPlaying": "true"}], "playing": false},
+    {"players": [{"isPlaying": false, "trackTitle": "Paused"}, {"isPlaying": true}], "playing": true},
+    {"players": [{"isPlaying": true, "dbusName": "org.mpris.MediaPlayer2.firefox.instance_1_2"}], "playing": true}
+  ]
+}

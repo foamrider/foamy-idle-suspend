@@ -6,9 +6,10 @@ function parse(settings = {}) {
   return Policy.parseConfig(JSON.stringify({ version: 1, plugins: [{ id: 'foamy.idle-suspend', ...settings }] }));
 }
 
-test('omitted options preserve the original battery-only laptop policy', () => {
+test('omitted options give a battery-only laptop policy that works without hibernation', () => {
   assert.deepEqual(parse(), { valid: true, settings: {
-    batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'suspend-then-hibernate'
+    batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'suspend',
+    pauseForMedia: true, lockBeforeSuspend: true
   }, error: '' });
 });
 
@@ -16,7 +17,8 @@ test('independent power timeouts and supported sleep actions are configurable', 
   for (const suspendAction of ['suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']) {
     const result = parse({ batteryTimeoutSec: null, acTimeoutSec: 1800, laptopsOnly: false, suspendAction });
     assert.equal(result.valid, true);
-    assert.deepEqual(result.settings, { batteryTimeoutSec: null, acTimeoutSec: 1800, laptopsOnly: false, suspendAction });
+    assert.deepEqual(result.settings, { batteryTimeoutSec: null, acTimeoutSec: 1800, laptopsOnly: false, suspendAction,
+      pauseForMedia: true, lockBeforeSuspend: true });
   }
 });
 
@@ -29,6 +31,8 @@ test('invalid overrides disable the policy instead of silently applying defaults
     }
   }
   assert.equal(parse({ laptopsOnly: 'false' }).valid, false);
+  assert.equal(parse({ pauseForMedia: 'no' }).valid, false);
+  assert.equal(parse({ lockBeforeSuspend: 0 }).valid, false);
   assert.equal(parse({ suspendAction: 'poweroff' }).valid, false);
   assert.equal(parse({ suspendAction: 'suspend; touch /tmp/unwanted' }).valid, false);
 });
@@ -61,4 +65,65 @@ test('null explicitly disables either timeout while omission retains its default
   assert.equal(disabled.settings.acTimeoutSec, null);
   assert.equal(parse({ acTimeoutSec: 1200 }).settings.batteryTimeoutSec, 900);
   assert.equal(parse({ batteryTimeoutSec: 1200 }).settings.acTimeoutSec, null);
+});
+
+test('unavailable actions fall back to suspend; unknown answers are trusted', () => {
+  assert.deepEqual(Policy.chooseAction('suspend', {}), { action: 'suspend', fallback: false });
+  assert.deepEqual(Policy.chooseAction('suspend-then-hibernate', { 'suspend-then-hibernate': 'na', suspend: 'yes' }),
+    { action: 'suspend', fallback: true });
+  assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'challenge' }), { action: 'hibernate', fallback: false });
+  assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'no', suspend: 'na' }), { action: '', fallback: false });
+  assert.deepEqual(Policy.chooseAction('suspend', { suspend: 'na' }), { action: '', fallback: false });
+  for (const action of Policy.ACTIONS) assert.match(Policy.CAN_METHODS[action], /^Can[A-Za-z]+$/);
+});
+
+test('logind idle or sleep block inhibitors defer sleep; delay-only lists do not', () => {
+  assert.equal(Policy.blockedByInhibitor('idle'), true);
+  assert.equal(Policy.blockedByInhibitor('handle-lid-switch:sleep'), true);
+  assert.equal(Policy.blockedByInhibitor(''), false);
+  assert.equal(Policy.blockedByInhibitor('shutdown:handle-power-key'), false);
+  assert.equal(Policy.blockedByInhibitor('sleeping'), false);
+});
+
+test('media-is-playing semantics match the contract shared with foamy-lock', () => {
+  const vectors = require('./media-playing.json');
+  for (const { players, playing } of vectors.cases)
+    assert.equal(Policy.mediaPlaying(players), playing, JSON.stringify(players));
+  assert.equal(Policy.mediaPlaying(undefined), false);
+});
+
+test('retries back off from one minute to at most fifteen', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 9].map(n => Policy.retryDelayMs(n)), [60000, 120000, 240000, 480000, 900000, 900000]);
+  assert.equal(Policy.retryDelayMs(1, 700), 1400);
+});
+
+test('only effective changes count as a new configuration', () => {
+  const a = parse(), b = parse();
+  assert.equal(Policy.sameConfiguration(a, b), true);
+  assert.equal(Policy.sameConfiguration(a, parse({ batteryTimeoutSec: 600 })), false);
+  assert.equal(Policy.sameConfiguration(a, Policy.parseConfig('{')), false);
+  assert.equal(Policy.sameConfiguration(null, a), false);
+});
+
+test('notifications stay quiet where the plugin never sleeps', () => {
+  const policy = Policy.defaults();
+  assert.equal(Policy.active(policy, true, true, true), true);
+  assert.equal(Policy.active(policy, true, true, false), false);
+  assert.equal(Policy.active({ ...policy, batteryTimeoutSec: null }, true, true, true), false);
+  assert.equal(Policy.active(policy, false, true, true), false);
+});
+
+test('every notification string has an English and Norwegian catalog entry', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const service = fs.readFileSync(path.join(__dirname, '../Service.qml'), 'utf8');
+  const en = require('../i18n/en.json'), no = require('../i18n/no.json');
+  const keys = [...service.matchAll(/FoamyI18n\.t\("((?:[^"\\]|\\.)*)"/g)].map(m => JSON.parse('"' + m[1] + '"'));
+  assert.ok(keys.length >= 10);
+  const tokens = s => [...s.matchAll(/%[1-9]/g)].map(m => m[0]).sort();
+  for (const key of keys) {
+    assert.equal(en[key], key, key);
+    assert.ok(no[key], key);
+    assert.deepEqual(tokens(no[key]), tokens(key), key);
+  }
+  assert.ok(!/\bIpcHandler\s*\{/.test(service), 'IPC goes through FoamyIpc');
 });
