@@ -253,7 +253,8 @@ try:
     print('PASS: unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off')
     awake = state_dir / 'stay-awake'; awake.touch()
     wait_for(lambda s: s['stayAwake'] is True and not s['enabled'])
-    assert 'Stay awake enabled' in notes()
+    # notify-send runs detached; give it a moment to record the call.
+    wait_for(lambda s: 'Stay awake enabled' in notes())
     ipc('test', 'state', False, True, False)
     time.sleep(0.15); count = len(sleep_calls())
     time.sleep(0.3); assert len(sleep_calls()) == count
