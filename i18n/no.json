@@ -1,0 +1,14 @@
+{
+  "Stay awake enabled": "Hold våken på",
+  "Stay awake disabled": "Hold våken av",
+  "Automatic sleep is paused": "Automatisk hvilemodus er satt på pause",
+  "Automatic sleep is back on": "Automatisk hvilemodus er på igjen",
+  "Sleep isn't available": "Hvilemodus er ikke tilgjengelig",
+  "This computer reports that it can't suspend, so automatic sleep is off.": "Datamaskinen melder at den ikke kan gå i hvilemodus, så automatisk hvilemodus er av.",
+  "Screen didn't lock": "Skjermen ble ikke låst",
+  "Automatic sleep was skipped because the screen couldn't be locked. It tries again while the computer stays idle.": "Automatisk hvilemodus ble hoppet over fordi skjermen ikke kunne låses. Det prøves igjen så lenge datamaskinen står ubrukt.",
+  "Automatic sleep failed": "Automatisk hvilemodus mislyktes",
+  "%1. It tries again while the computer stays idle.": "%1. Det prøves igjen så lenge datamaskinen står ubrukt.",
+  "%1 isn't available": "%1 er ikke tilgjengelig",
+  "Automatic sleep uses suspend instead. Set up hibernation or choose another suspendAction.": "Automatisk hvilemodus bruker suspend i stedet. Sett opp dvalemodus eller velg en annen suspendAction."
+}
