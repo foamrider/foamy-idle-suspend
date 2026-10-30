@@ -111,7 +111,8 @@ When the configured idle timeout expires, the plugin:
    to about ten seconds for `omarchy-shell lock status` to report `secure`
    (`lockBeforeSuspend`). This is in addition to Omarchy's own lock-before-sleep
    service, so the computer never sleeps unlocked if that service is not running;
-3. calls `systemctl` with the selected sleep action.
+3. checks media and inhibitors again (they may have started while the screen was
+   locking) and then calls `systemctl` with the selected sleep action.
 
 If the lock or the sleep request fails, a notification says so once, and the
 plugin tries again while the computer stays idle: after one minute, doubling up

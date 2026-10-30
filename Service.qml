@@ -42,7 +42,8 @@ Item {
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
 
-  // One sleep attempt at a time: checking inhibitors, locking, suspending.
+  // One sleep attempt at a time: checking inhibitors, locking, rechecking
+  // inhibitors, suspending.
   property string phase: "idle"
   property string attemptSource: ""
   property string deferredReason: ""
@@ -107,16 +108,20 @@ Item {
         FoamyI18n.t("This computer reports that it can't suspend, so automatic sleep is off."))
       return
     }
-    if (root.policy.pauseForMedia && root.mediaPlaying) {
-      // Retried as soon as playback stops while still idle.
-      root.deferredReason = "media-playing"
-      logEvent("suspend-deferred", "media playing")
-      return
-    }
+    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
     root.deferredReason = ""
     root.attemptSource = source
     root.phase = "checking"
     inhibitorProbe.running = true
+  }
+
+  // Media can start (remote control, a timer) while the asynchronous checks
+  // or the lock run, so every step re-checks it. The deferral is retried as
+  // soon as playback stops while still idle (onMediaPlayingChanged).
+  function deferForMedia() {
+    if (!root.policy.pauseForMedia || !root.mediaPlaying) return false
+    root.deferredReason = "media-playing"
+    return true
   }
 
   function afterInhibitorCheck(text) {
@@ -125,13 +130,18 @@ Item {
     try { value = String(JSON.parse(text).data || "") } catch (error) { value = "" }
     root.blockInhibited = value
     if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
+    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
     if (Policy.blockedByInhibitor(value)) {
       root.deferredReason = "inhibited"
       finishAttempt("suspend-deferred", "logind inhibitor: " + value)
       scheduleRetry()
       return
     }
-    if (root.policy.lockBeforeSuspend) {
+    // The second check runs after locking, right before sleeping: an
+    // inhibitor taken while the lock was coming up still keeps us awake.
+    if (root.phase === "rechecking") {
+      runSuspend()
+    } else if (root.policy.lockBeforeSuspend) {
       root.phase = "locking"
       lockProcess.running = true
     } else {
@@ -144,7 +154,9 @@ Item {
     var source = root.attemptSource
     if (result === "secure") {
       if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity while locking")
-      runSuspend()
+      if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
+      root.phase = "rechecking"
+      inhibitorProbe.running = true
       return
     }
     // Defense in depth: never sleep with the session exposed. The user is
@@ -158,6 +170,9 @@ Item {
   }
 
   function runSuspend() {
+    // Last synchronous check before the sleep command.
+    if (!stillIdle(root.attemptSource)) return finishAttempt("suspend-skipped", "activity before sleep")
+    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
     root.phase = "suspending"
     root.processError = ""
     suspendProcess.command = ["systemctl", root.effectiveAction]
@@ -234,7 +249,7 @@ Item {
   }
 
   onMediaPlayingChanged: {
-    if (mediaPlaying || deferredReason !== "media-playing") return
+    if (mediaPlaying || deferredReason !== "media-playing" || phase !== "idle") return
     deferredReason = ""
     var source = currentSource()
     if (monitorFor(source).isIdle) requestSuspend(source)

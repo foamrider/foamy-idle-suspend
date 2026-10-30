@@ -64,16 +64,23 @@ elif name == 'busctl':
     if 'get-property' in sys.argv: print(json.dumps({'type': 's', 'data': read('block-inhibited', '')}))
     else: print(json.dumps({'type': 's', 'data': [read('can-' + sys.argv[-1], 'yes')]}))
 elif name == 'omarchy-shell' and sys.argv[1:3] == ['lock', 'status']:
-    print(json.dumps({'secure': (home / 'locked').exists(), 'requested': (home / 'locked').exists()}))
+    pending = home / 'locked-at'
+    if pending.exists() and time.time() >= float(pending.read_text()): (home / 'locked').touch()
+    secure = (home / 'locked').exists()
+    print(json.dumps({'secure': secure, 'requested': secure or pending.exists()}))
 else:
     with (home / 'calls').open('a') as f: f.write(json.dumps([name] + sys.argv[1:]) + '\\n')
     if name == 'omarchy-shell':
         reply = read('lock-reply', 'ok')
-        if reply == 'ok': (home / 'locked').touch()
+        delay = read('lock-delay', '')
+        if reply == 'ok' and delay:
+            if not (home / 'locked-at').exists(): (home / 'locked-at').write_text(str(time.time() + float(delay)))
+        elif reply == 'ok': (home / 'locked').touch()
         print(reply)
     if name == 'systemctl':
         time.sleep(0.1)
         (home / 'locked').unlink(missing_ok=True)  # the next attempt must lock again
+        (home / 'locked-at').unlink(missing_ok=True)
         if (home / 'fail-sleep').exists():
             print('mock sleep unavailable.', file=sys.stderr); sys.exit(1)
 '''
@@ -158,7 +165,28 @@ try:
     wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=3)
     active()
     (base / 'block-inhibited').unlink()
-    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep')
+    # Playback or an inhibitor that starts while the lock comes up still defers.
+    (base / 'lock-delay').write_text('1.0')
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: s['phase'] == 'locking')
+    ipc('test', 'playing', True)
+    wait_for(lambda s: s['deferredReason'] == 'media-playing' and s['phase'] == 'idle', timeout=4)
+    time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although media started during locking'
+    ipc('test', 'playing', False)
+    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    active()
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: s['phase'] == 'locking')
+    (base / 'block-inhibited').write_text('sleep')
+    wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['phase'] == 'idle', timeout=4)
+    time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although an inhibitor appeared during locking'
+    (base / 'block-inhibited').unlink()
+    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    active()
+    (base / 'lock-delay').unlink()
+    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking')
     # No secure lock, no sleep: notify once and retry while idle.
     (base / 'lock-reply').write_text('missing-pam')
     count = len(sleep_calls())
