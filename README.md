@@ -2,7 +2,9 @@
 
 Automatic sleep for Omarchy, with separate idle timeouts for battery and AC power.
 By default, laptops suspend after 15 minutes idle on battery and do not
-sleep automatically on AC. The default action is `suspend-then-hibernate`.
+sleep automatically on AC. The default action is `suspend`. Before sleeping the
+plugin locks the screen and waits until the lock is secure, and it waits while
+music or video is playing.
 
 ## Install
 
@@ -10,7 +12,8 @@ sleep automatically on AC. The default action is `suspend-then-hibernate`.
 omarchy plugin add https://github.com/foamrider/foamy-idle-suspend.git --enable
 ```
 
-Requires Omarchy Quattro. This is a background service with no bar widget.
+Requires Omarchy 4.0.6 or later and targets Omarchy 4.5. This is a background
+service with no bar widget.
 Disable any previous automatic sleep plugin so only one sleep service runs.
 
 ## Configuration
@@ -25,11 +28,13 @@ Settings go directly on the entry, without a `config` object:
   "batteryTimeoutSec": 900,
   "acTimeoutSec": null,
   "laptopsOnly": true,
-  "suspendAction": "suspend-then-hibernate"
+  "suspendAction": "suspend",
+  "pauseForMedia": true,
+  "lockBeforeSuspend": true
 }
 ```
 
-All four settings are optional. The example shows their defaults, so an entry
+All settings are optional. The example shows their defaults, so an entry
 containing only `"id": "foamy.idle-suspend"` has the same behavior.
 
 | Setting | Default | Meaning |
@@ -37,7 +42,9 @@ containing only `"id": "foamy.idle-suspend"` has the same behavior.
 | `batteryTimeoutSec` | `900` | Idle seconds before sleeping while UPower reports battery power. |
 | `acTimeoutSec` | `null` | Idle seconds before sleeping while UPower reports AC power. |
 | `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. Set `false` to allow desktops and other chassis types. |
-| `suspendAction` | `"suspend-then-hibernate"` | The systemd sleep action to run when the active timeout expires. |
+| `suspendAction` | `"suspend"` | The systemd sleep action to run when the active timeout expires. |
+| `pauseForMedia` | `true` | Wait while any MPRIS player (music, video, podcast, browser tab) is playing. Paused players do not count. |
+| `lockBeforeSuspend` | `true` | Lock the screen and wait until the lock reports it is secure before sleeping. If it cannot lock, it does not sleep. |
 
 For either timeout:
 
@@ -89,11 +96,28 @@ plugin loaded. Remove its entry from `plugins` to disable the plugin itself.
 | `"suspend-then-hibernate"` | Suspend first, then hibernate according to systemd's sleep policy. |
 
 The machine must already support the selected action. This plugin does not
-configure swap, hibernation support, or systemd's hibernation delay. Failed
-sleep requests are reported in its status and shell logs.
+configure swap, hibernation support, or systemd's hibernation delay. At startup
+and when `suspendAction` changes it asks logind which actions are available. If
+the selected one is not (for example `suspend-then-hibernate` without
+`omarchy-hibernation-setup`), it uses `suspend` instead and shows a notification
+once. Status reports `effectiveAction`, `actionFallback` and `actionSupport`.
 
-When the configured idle timeout expires, the plugin calls `systemctl` with
-the selected sleep action. Enabling the plugin enables this automatic policy;
+When the configured idle timeout expires, the plugin:
+
+1. waits while media is playing (`pauseForMedia`) or while an application holds
+   a logind `idle` or `sleep` block inhibitor (`systemd-inhibit`);
+2. locks the screen through the public lock interface (`omarchy-shell lock lock`,
+   answered by the stock lock or a replacement such as Foamy Lock) and waits up
+   to about ten seconds for `omarchy-shell lock status` to report `secure`
+   (`lockBeforeSuspend`). This is in addition to Omarchy's own lock-before-sleep
+   service, so the computer never sleeps unlocked if that service is not running;
+3. calls `systemctl` with the selected sleep action.
+
+If the lock or the sleep request fails, a notification says so once, and the
+plugin tries again while the computer stays idle: after one minute, doubling up
+to fifteen minutes. After a successful request it also checks again a minute
+later, so a wake without input (an RTC alarm, a USB device, the lid) does not
+leave the computer awake on battery. Any input stops the retries. Enabling the plugin enables this automatic policy;
 it does not ask for confirmation at each timeout. System authorization rules
 still apply to the sleep request.
 
@@ -102,11 +126,17 @@ still apply to the sleep request.
 Edits to `shell.json` reload automatically. Missing options use defaults;
 invalid options or unreadable configuration pause automatic sleep and report
 an error. A malformed override never silently enables a different sleep policy.
+Writes that do not change this plugin's settings (bar edits, other plugins) do
+not restart the idle countdown.
 For local source edits or a manually linked installation, run
 `omarchy restart shell` after changing plugin code.
 
-Omarchy's **Stay awake** toggle and Wayland idle inhibitors pause automatic
-sleep. The plugin also shows a notification when Stay awake changes.
+Omarchy's **Stay awake** toggle, Wayland idle inhibitors (video players and
+browsers playing video), logind block inhibitors and MPRIS playback pause
+automatic sleep. Apps that only call `org.freedesktop.ScreenSaver.Inhibit` are not
+covered: Omarchy runs no service under that D-Bus name, so those calls reach
+nobody. When the plugin would put this computer to sleep, it also shows a
+notification when Stay awake changes.
 Screensaver and lock timings remain under stock `idle.screensaver` and
 `idle.lock`. Keep Omarchy's idle and lock services enabled; locking before sleep
 remains the responsibility of Omarchy's existing sleep/lock setup.
@@ -117,8 +147,11 @@ remains the responsibility of Omarchy's existing sleep/lock setup.
 omarchy-shell foamy.idle-suspend status
 ```
 
-Status includes the effective policy, configuration validity, chassis, power
-source, Stay awake state, enabled monitors, and the latest error. `enabled`
+Status includes the effective policy and sleep action, configuration validity,
+chassis, power source, Stay awake state, enabled monitors, whether media is
+playing, the current attempt (`phase`, `deferredReason`, `lastLockResult`,
+`failureStreak`, `retryScheduled`) and the latest error. On Omarchy 4.5 the
+call is answered over the shell socket. `enabled`
 means a sleep monitor is currently enabled, so it is `false` on AC with the
 default settings, on a desktop with `laptopsOnly: true`, or while Stay awake
 is enabled. The `debug` method returns the same data.
@@ -128,15 +161,21 @@ is enabled. The `debug` method returns the same data.
 The plugin is independent of other Foamy plugins and works with the stock bar.
 It reads the same `~/.config/omarchy/shell.json` path as the stock shell because
 the restricted service API does not expose plugin entries. Runtime dependencies
-are Omarchy Quattro, Quickshell with Wayland and UPower, systemd, and
-`notify-send`; no additional runtime package is required on standard Omarchy.
+are Omarchy, Quickshell with Wayland, UPower and MPRIS, systemd (`systemctl`,
+`busctl`), `jq`, `omarchy-shell`, and `notify-send`; no additional runtime package
+is required on standard Omarchy.
 
 ```sh
-node tests/policy.test.cjs
-python tests/runtime.py
+node --test tests/*.test.cjs
+python3 -I -B tests/runtime.py
+bash tests/kit-check.sh
 qmllint Service.qml
 omarchy plugin validate .
 ```
+
+Set `FOAMY_TEST_COMMONS` to an Omarchy 4.5 `shell/Commons` directory to run the
+runtime test against that version. Shared foamy components (translations, IPC)
+live in `kit/`, copied from [foamy-kit](https://github.com/foamrider/foamy-kit).
 
 The runtime test uses a temporary home with mocked power, idle events, and
 system commands. It tests real Quickshell configuration watching and process
@@ -163,4 +202,6 @@ Licensed under [MIT](LICENSE).
 
 Provided **as is**, without warranty or guaranteed support. Use at your own risk.
 
-This background service has no translated user interface. It does not set or override the Omarchy language.
+Notifications follow **Omarchy → Setup → Language** on Omarchy 4.5 (English and
+Norwegian catalogs; missing translations fall back to English). Omarchy 4.0 shows
+them in English. The plugin does not set or override the Omarchy language.
