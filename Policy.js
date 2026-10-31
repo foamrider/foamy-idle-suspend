@@ -3,8 +3,25 @@ function defaults() {
     batteryTimeoutSec: 900,
     acTimeoutSec: null,
     laptopsOnly: true,
-    suspendAction: "suspend-then-hibernate"
+    // suspend-then-hibernate where hibernation is set up, else suspend
+    // (Omarchy sets hibernation up only on request). See chooseAction.
+    suspendAction: "auto",
+    // Defer while an MPRIS player is playing (see mediaPlaying).
+    pauseForMedia: true,
+    // Lock the screen and wait for a secure lock before sleeping.
+    lockBeforeSuspend: true
   }
+}
+
+var ACTIONS = ["suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate"]
+// What suspendAction may be set to: "auto" or one of ACTIONS.
+var CHOICES = ["auto"].concat(ACTIONS)
+// logind's Manager method that says whether an action can run.
+var CAN_METHODS = {
+  "suspend": "CanSuspend",
+  "hibernate": "CanHibernate",
+  "hybrid-sleep": "CanHybridSleep",
+  "suspend-then-hibernate": "CanSuspendThenHibernate"
 }
 
 function parseConfig(text) {
@@ -33,8 +50,12 @@ function parseConfig(text) {
     }
     if (typeof policy.laptopsOnly !== "boolean")
       throw new Error("laptopsOnly must be true or false")
-    if (["suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate"].indexOf(policy.suspendAction) === -1)
-      throw new Error("suspendAction must be suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
+    if (typeof policy.pauseForMedia !== "boolean")
+      throw new Error("pauseForMedia must be true or false")
+    if (typeof policy.lockBeforeSuspend !== "boolean")
+      throw new Error("lockBeforeSuspend must be true or false")
+    if (CHOICES.indexOf(policy.suspendAction) === -1)
+      throw new Error("suspendAction must be auto, suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
     return { valid: true, settings: policy, error: "" }
   } catch (error) {
     // Never apply a fallback sleep policy after a malformed user override.
@@ -42,8 +63,73 @@ function parseConfig(text) {
   }
 }
 
+// Same effective configuration: a write to shell.json that changes nothing
+// here (bar edits, other plugins) must not restart the idle countdown.
+function sameConfiguration(a, b) {
+  if (!a || !b) return false
+  return a.valid === b.valid && a.error === b.error && JSON.stringify(a.settings) === JSON.stringify(b.settings)
+}
+
 function allowed(policy, configValid, chassisLoaded, isLaptop, idleEnabled) {
   return configValid && idleEnabled && (!policy.laptopsOnly || (chassisLoaded && isLaptop))
 }
 
-if (typeof module !== "undefined") module.exports = { defaults: defaults, parseConfig: parseConfig, allowed: allowed }
+// Whether this plugin would sleep at all, Stay awake aside. Its notifications
+// stay quiet on machines where it does nothing.
+function active(policy, configValid, chassisLoaded, isLaptop) {
+  return allowed(policy, configValid, chassisLoaded, isLaptop, true)
+    && (policy.batteryTimeoutSec !== null || policy.acTimeoutSec !== null)
+}
+
+// Shared with foamy-lock (Model.mediaPlaying), see tests/media-playing.json:
+// media is playing when any MPRIS player reports isPlaying === true.
+function mediaPlaying(players) {
+  var list = players || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].isPlaying === true) return true
+  }
+  return false
+}
+
+// logind's BlockInhibited is a colon-separated list ("idle:sleep").
+function blockedByInhibitor(blockInhibited) {
+  var what = String(blockInhibited || "").split(":")
+  return what.indexOf("idle") !== -1 || what.indexOf("sleep") !== -1
+}
+
+// Answers from logind's Can* methods: "yes", "challenge" (allowed after
+// authentication), "no", "na". Unknown answers (probe failed) are trusted
+// and left to systemctl. An unavailable action falls back to suspend.
+function usable(answer) {
+  return answer === undefined || answer === null || answer === "" || answer === "yes" || answer === "challenge"
+}
+
+// "auto" uses suspend-then-hibernate only when logind says plainly "yes"
+// (hibernation set up with swap and resume), otherwise plain suspend; it is
+// never a fallback, so it never notifies. Explicit actions are kept when
+// usable and otherwise fall back to suspend (one notification).
+function chooseAction(configured, answers) {
+  var support = answers || {}
+  if (configured === "auto") {
+    if (support["suspend-then-hibernate"] === "yes") return { action: "suspend-then-hibernate", fallback: false }
+    return { action: usable(support["suspend"]) ? "suspend" : "", fallback: false }
+  }
+  if (usable(support[configured])) return { action: configured, fallback: false }
+  if (configured !== "suspend" && usable(support["suspend"])) return { action: "suspend", fallback: true }
+  return { action: "", fallback: false }
+}
+
+// Retry while still idle: one minute after a wake without input or a
+// deferral, doubling after each failure up to fifteen minutes.
+function retryDelayMs(failures, baseMs) {
+  var base = baseMs || 60000
+  var n = Math.max(0, Math.min(4, Number(failures) || 0))
+  return Math.min(base * Math.pow(2, n), base * 15)
+}
+
+if (typeof module !== "undefined") module.exports = {
+  defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
+  sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
+  blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
+  ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
+}

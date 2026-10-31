@@ -1,0 +1,14 @@
+{
+  "Stay awake enabled": "Stay awake enabled",
+  "Stay awake disabled": "Stay awake disabled",
+  "Automatic sleep is paused": "Automatic sleep is paused",
+  "Automatic sleep is back on": "Automatic sleep is back on",
+  "Sleep isn't available": "Sleep isn't available",
+  "This computer reports that it can't suspend, so automatic sleep is off.": "This computer reports that it can't suspend, so automatic sleep is off.",
+  "Screen didn't lock": "Screen didn't lock",
+  "Automatic sleep was skipped because the screen couldn't be locked. It tries again while the computer stays idle.": "Automatic sleep was skipped because the screen couldn't be locked. It tries again while the computer stays idle.",
+  "Automatic sleep failed": "Automatic sleep failed",
+  "%1. It tries again while the computer stays idle.": "%1. It tries again while the computer stays idle.",
+  "%1 isn't available": "%1 isn't available",
+  "Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto.": "Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto."
+}
