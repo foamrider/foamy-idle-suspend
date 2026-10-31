@@ -164,6 +164,8 @@ is enabled. The `debug` method returns the same data.
 
 ## Development
 
+`kit/` holds shared components copied from [foamy-kit](https://github.com/foamrider/foamy-kit); edit them there, not here.
+
 The plugin is independent of other Foamy plugins and works with the stock bar.
 It reads the same `~/.config/omarchy/shell.json` path as the stock shell because
 the restricted service API does not expose plugin entries. Runtime dependencies
