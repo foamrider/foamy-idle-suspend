@@ -42,8 +42,8 @@ Item {
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
 
-  // One sleep attempt at a time: checking inhibitors, locking, rechecking
-  // inhibitors, suspending.
+  // One sleep attempt at a time: probing sleep actions, checking inhibitors,
+  // locking, rechecking inhibitors, suspending.
   property string phase: "idle"
   property string attemptSource: ""
   // An idle request from the other power source that arrived while an
@@ -107,16 +107,25 @@ Item {
       logEvent("suspend-skipped", "request already running")
       return
     }
+    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
+    root.deferredReason = ""
+    root.attemptSource = source
+    // Ask logind again on every attempt: swap and hibernation can change
+    // between attempts, and "auto" follows them.
+    root.phase = "probing"
+    probeActions()
+  }
+
+  function afterActionProbe() {
+    var source = root.attemptSource
+    if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
     if (!root.effectiveAction) {
       root.processError = "No sleep action is available on this system"
-      logEvent("suspend-unavailable", root.policy.suspendAction)
+      finishAttempt("suspend-unavailable", root.policy.suspendAction)
       notifyOnce("unavailable", FoamyI18n.t("Sleep isn't available"),
         FoamyI18n.t("This computer reports that it can't suspend, so automatic sleep is off."))
       return
     }
-    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
-    root.deferredReason = ""
-    root.attemptSource = source
     root.phase = "checking"
     inhibitorProbe.running = true
   }
@@ -260,7 +269,7 @@ Item {
     Quickshell.execDetached([
       "notify-send", "-a", "Foamy Idle Suspend", "-u", "normal", "-h", "string:omarchy-glyph:\u{f04b2}",
       FoamyI18n.t("%1 isn't available", policy.suspendAction),
-      FoamyI18n.t("Automatic sleep uses suspend instead. Set up hibernation or choose another suspendAction.")
+      FoamyI18n.t("Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto.")
     ])
   }
 
@@ -302,6 +311,8 @@ Item {
       configValid: root.configuration.valid,
       policy: root.policy,
       effectiveAction: root.effectiveAction,
+      // What "auto" resolved to at the last probe (null for explicit actions).
+      autoAction: root.policy.suspendAction === "auto" ? root.effectiveAction : null,
       actionFallback: root.actionChoice.fallback,
       actionSupport: root.actionSupport,
       chassis: root.chassis,
@@ -458,7 +469,10 @@ Item {
     command: ["timeout", "--kill-after=1s", "5s", "bash", "-c",
       'for m in CanSuspend CanHibernate CanHybridSleep CanSuspendThenHibernate; do printf "%s " "$m"; busctl --system --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$m" 2>/dev/null || echo "{}"; done']
     stdout: StdioCollector { id: actionOutput; waitForEnd: true }
-    onExited: root.applyActionProbe(actionOutput.text)
+    onExited: {
+      root.applyActionProbe(actionOutput.text)
+      if (root.phase === "probing") root.afterActionProbe()
+    }
   }
 
   // Applications that hold a logind "idle" or "sleep" block inhibitor

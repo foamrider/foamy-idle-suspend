@@ -3,8 +3,9 @@ function defaults() {
     batteryTimeoutSec: 900,
     acTimeoutSec: null,
     laptopsOnly: true,
-    // Works without hibernation, which Omarchy sets up only on request.
-    suspendAction: "suspend",
+    // suspend-then-hibernate where hibernation is set up, else suspend
+    // (Omarchy sets hibernation up only on request). See chooseAction.
+    suspendAction: "auto",
     // Defer while an MPRIS player is playing (see mediaPlaying).
     pauseForMedia: true,
     // Lock the screen and wait for a secure lock before sleeping.
@@ -13,6 +14,8 @@ function defaults() {
 }
 
 var ACTIONS = ["suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate"]
+// What suspendAction may be set to: "auto" or one of ACTIONS.
+var CHOICES = ["auto"].concat(ACTIONS)
 // logind's Manager method that says whether an action can run.
 var CAN_METHODS = {
   "suspend": "CanSuspend",
@@ -51,8 +54,8 @@ function parseConfig(text) {
       throw new Error("pauseForMedia must be true or false")
     if (typeof policy.lockBeforeSuspend !== "boolean")
       throw new Error("lockBeforeSuspend must be true or false")
-    if (ACTIONS.indexOf(policy.suspendAction) === -1)
-      throw new Error("suspendAction must be suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
+    if (CHOICES.indexOf(policy.suspendAction) === -1)
+      throw new Error("suspendAction must be auto, suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
     return { valid: true, settings: policy, error: "" }
   } catch (error) {
     // Never apply a fallback sleep policy after a malformed user override.
@@ -101,8 +104,16 @@ function usable(answer) {
   return answer === undefined || answer === null || answer === "" || answer === "yes" || answer === "challenge"
 }
 
+// "auto" uses suspend-then-hibernate only when logind says plainly "yes"
+// (hibernation set up with swap and resume), otherwise plain suspend; it is
+// never a fallback, so it never notifies. Explicit actions are kept when
+// usable and otherwise fall back to suspend (one notification).
 function chooseAction(configured, answers) {
   var support = answers || {}
+  if (configured === "auto") {
+    if (support["suspend-then-hibernate"] === "yes") return { action: "suspend-then-hibernate", fallback: false }
+    return { action: usable(support["suspend"]) ? "suspend" : "", fallback: false }
+  }
   if (usable(support[configured])) return { action: configured, fallback: false }
   if (configured !== "suspend" && usable(support["suspend"])) return { action: "suspend", fallback: true }
   return { action: "", fallback: false }
@@ -120,5 +131,5 @@ if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
   sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
-  ACTIONS: ACTIONS, CAN_METHODS: CAN_METHODS
+  ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }

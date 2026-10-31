@@ -121,7 +121,7 @@ process = subprocess.Popen(['qs', '-p', str(app), '--no-color'], env=env, stdout
 try:
     value = wait_for(lambda s: s['enabled'] and s['chassisLoaded'] and s['actionSupport'])
     assert value['policy']['batteryTimeoutSec'] == 900 and value['policy']['acTimeoutSec'] is None
-    assert value['policy']['suspendAction'] == 'suspend' and value['effectiveAction'] == 'suspend'
+    assert value['policy']['suspendAction'] == 'auto' and value['effectiveAction'] == 'suspend' and value['autoAction'] == 'suspend'
     assert value['actionSupport']['suspend-then-hibernate'] == 'na' and not value['actionFallback']
     ipc('test', 'state', True, True, True)
     time.sleep(0.15); assert not sleep_calls(), 'Wayland inhibitor did not block sleep'
@@ -139,6 +139,19 @@ try:
     time.sleep(0.9); count = len(sleep_calls())
     time.sleep(0.9); assert len(sleep_calls()) == count, 'activity must stop retries'
     print('PASS: lock then suspend, duplicate request, retry after a wake without input, activity stops retries')
+    # "auto" re-asks logind on every attempt: once hibernation is set up it
+    # uses suspend-then-hibernate, and plain suspend again when it is not.
+    (base / 'can-CanSuspendThenHibernate').write_text('yes')
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: sleep_calls()[-1] == ['systemctl', 'suspend-then-hibernate'])
+    assert status()['autoAction'] == 'suspend-then-hibernate' and not status()['actionFallback']
+    active()
+    (base / 'can-CanSuspendThenHibernate').write_text('na')
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: sleep_calls()[-1] == ['systemctl', 'suspend'] and s['autoAction'] == 'suspend')
+    active()
+    assert not [n for n in notes() if "isn't available" in n], 'auto never notifies a fallback'
+    print('PASS: auto resolves per attempt (suspend-then-hibernate when logind says yes, else suspend)')
     # An unrelated shell.json write keeps the idle countdown running.
     arms = int(ipc('test', 'arms'))
     write_config(extra=[{'id': 'foamy.other', 'value': 1}])

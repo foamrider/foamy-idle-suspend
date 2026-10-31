@@ -8,13 +8,13 @@ function parse(settings = {}) {
 
 test('omitted options give a battery-only laptop policy that works without hibernation', () => {
   assert.deepEqual(parse(), { valid: true, settings: {
-    batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'suspend',
+    batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'auto',
     pauseForMedia: true, lockBeforeSuspend: true
   }, error: '' });
 });
 
 test('independent power timeouts and supported sleep actions are configurable', () => {
-  for (const suspendAction of ['suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']) {
+  for (const suspendAction of ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']) {
     const result = parse({ batteryTimeoutSec: null, acTimeoutSec: 1800, laptopsOnly: false, suspendAction });
     assert.equal(result.valid, true);
     assert.deepEqual(result.settings, { batteryTimeoutSec: null, acTimeoutSec: 1800, laptopsOnly: false, suspendAction,
@@ -34,6 +34,7 @@ test('invalid overrides disable the policy instead of silently applying defaults
   assert.equal(parse({ pauseForMedia: 'no' }).valid, false);
   assert.equal(parse({ lockBeforeSuspend: 0 }).valid, false);
   assert.equal(parse({ suspendAction: 'poweroff' }).valid, false);
+  assert.equal(parse({ suspendAction: 'Auto' }).valid, false);
   assert.equal(parse({ suspendAction: 'suspend; touch /tmp/unwanted' }).valid, false);
 });
 
@@ -126,4 +127,19 @@ test('every notification string has an English and Norwegian catalog entry', () 
     assert.deepEqual(tokens(no[key]), tokens(key), key);
   }
   assert.ok(!/\bIpcHandler\s*\{/.test(service), 'IPC goes through FoamyIpc');
+});
+
+test('auto uses suspend-then-hibernate only where logind says yes, else suspend', () => {
+  const yes = { suspend: 'yes', 'suspend-then-hibernate': 'yes' };
+  assert.deepEqual(Policy.chooseAction('auto', yes), { action: 'suspend-then-hibernate', fallback: false });
+  for (const answer of ['na', 'no', 'challenge', '', undefined])
+    assert.deepEqual(Policy.chooseAction('auto', { suspend: 'yes', 'suspend-then-hibernate': answer }),
+      { action: 'suspend', fallback: false }, String(answer));
+  assert.deepEqual(Policy.chooseAction('auto', {}), { action: 'suspend', fallback: false });
+  assert.deepEqual(Policy.chooseAction('auto', { suspend: 'na', 'suspend-then-hibernate': 'na' }), { action: '', fallback: false });
+  // Explicit values are unchanged by the new default.
+  assert.deepEqual(Policy.chooseAction('suspend', yes), { action: 'suspend', fallback: false });
+  assert.deepEqual(Policy.chooseAction('suspend-then-hibernate', yes), { action: 'suspend-then-hibernate', fallback: false });
+  assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'na', suspend: 'yes' }), { action: 'suspend', fallback: true });
+  assert.deepEqual(Policy.CHOICES, ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']);
 });

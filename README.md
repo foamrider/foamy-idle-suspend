@@ -2,7 +2,8 @@
 
 Automatic sleep for Omarchy, with separate idle timeouts for battery and AC power.
 By default, laptops suspend after 15 minutes idle on battery and do not
-sleep automatically on AC. The default action is `suspend`. Before sleeping the
+sleep automatically on AC. The default action is `auto`: suspend-then-hibernate
+when hibernation is set up, otherwise plain suspend. Before sleeping the
 plugin locks the screen and waits until the lock is secure, and it waits while
 music or video is playing.
 
@@ -28,7 +29,7 @@ Settings go directly on the entry, without a `config` object:
   "batteryTimeoutSec": 900,
   "acTimeoutSec": null,
   "laptopsOnly": true,
-  "suspendAction": "suspend",
+  "suspendAction": "auto",
   "pauseForMedia": true,
   "lockBeforeSuspend": true
 }
@@ -42,7 +43,7 @@ containing only `"id": "foamy.idle-suspend"` has the same behavior.
 | `batteryTimeoutSec` | `900` | Idle seconds before sleeping while UPower reports battery power. |
 | `acTimeoutSec` | `null` | Idle seconds before sleeping while UPower reports AC power. |
 | `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. Set `false` to allow desktops and other chassis types. |
-| `suspendAction` | `"suspend"` | The systemd sleep action to run when the active timeout expires. |
+| `suspendAction` | `"auto"` | The systemd sleep action to run when the active timeout expires. `"auto"` picks one on each attempt (see below). |
 | `pauseForMedia` | `true` | Wait while any MPRIS player (music, video, podcast, browser tab) is playing. Paused players do not count. |
 | `lockBeforeSuspend` | `true` | Lock the screen and wait until the lock reports it is secure before sleeping. If it cannot lock, it does not sleep. |
 
@@ -90,17 +91,21 @@ plugin loaded. Remove its entry from `plugins` to disable the plugin itself.
 
 | `suspendAction` | Behavior |
 | --- | --- |
+| `"auto"` | `suspend-then-hibernate` when logind reports `CanSuspendThenHibernate` = `yes` (hibernation set up with swap and resume, for example by `omarchy-hibernation-setup`), otherwise `suspend`. Checked again before every sleep, so it follows swap changes. |
 | `"suspend"` | Suspend to memory. |
 | `"hibernate"` | Save the session to disk and power down. |
 | `"hybrid-sleep"` | Save the session to disk, then suspend to memory. |
 | `"suspend-then-hibernate"` | Suspend first, then hibernate according to systemd's sleep policy. |
 
-The machine must already support the selected action. This plugin does not
-configure swap, hibernation support, or systemd's hibernation delay. At startup
-and when `suspendAction` changes it asks logind which actions are available. If
-the selected one is not (for example `suspend-then-hibernate` without
-`omarchy-hibernation-setup`), it uses `suspend` instead and shows a notification
-once. Status reports `effectiveAction`, `actionFallback` and `actionSupport`.
+This plugin does not configure swap, hibernation support, or systemd's
+hibernation delay. Before every sleep it asks logind which actions are available.
+An explicitly chosen action the machine cannot run (for example
+`suspend-then-hibernate` without `omarchy-hibernation-setup`) falls back to
+`suspend` with a notification, once. `"auto"` never notifies: it simply uses what
+the machine supports. Status reports `effectiveAction` (the action the next sleep
+uses), `autoAction` (what `"auto"` resolved to, or `null` for an explicit
+action), `actionFallback` and `actionSupport`. Configurations that set
+`"suspend"` explicitly keep plain suspend.
 
 When the configured idle timeout expires, the plugin:
 

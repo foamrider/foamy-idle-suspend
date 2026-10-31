@@ -10,5 +10,5 @@
   "Automatic sleep failed": "Automatic sleep failed",
   "%1. It tries again while the computer stays idle.": "%1. It tries again while the computer stays idle.",
   "%1 isn't available": "%1 isn't available",
-  "Automatic sleep uses suspend instead. Set up hibernation or choose another suspendAction.": "Automatic sleep uses suspend instead. Set up hibernation or choose another suspendAction."
+  "Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto.": "Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto."
 }
