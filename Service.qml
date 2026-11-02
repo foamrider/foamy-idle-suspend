@@ -382,7 +382,8 @@ Item {
     if (root.deferredReason !== "") Qt.callLater(resumeIfIdle)
   }
 
-  // Third-party service APIs do not expose plugins[] entries. Watch the same
+  // The scoped service API can write this plugin's plugins[] entry
+  // (shell.updateEntryInline) but offers no way to read it. Watch the same
   // file as the stock shell so edits apply without private host access.
   FileView {
     id: configFile
