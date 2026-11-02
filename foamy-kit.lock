@@ -1,8 +1,8 @@
 # foamy-kit.lock: written by foamy-kit sync.sh; do not edit.
 # Hashes are of each file's body (the file without its stamp line);
 # notices are hashed whole. tests/kit-check.sh verifies them.
-version 0.4.4
-source 7ec4e9543aa1
+version 0.4.5
+source 69b589ce3e41
 components FoamyI18n,FoamyIpc
 1823e930a714d5adabc6349dc4e43ca810b971939970c5c503cb219fe96533b9  kit/FoamyI18n.qml
 5a372861e53b40a49d0d97cc2796f89231337a9c40700f26a0fcb694d70d2a9b  kit/FoamyIpc.qml
