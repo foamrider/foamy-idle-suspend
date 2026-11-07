@@ -13,7 +13,7 @@ music or video is playing.
 omarchy plugin add https://github.com/foamrider/foamy-idle-suspend.git --enable
 ```
 
-Requires Omarchy 4.0.6 or later and targets Omarchy 4.5. This is a background
+Requires Omarchy 4.5. This is a background
 service with no bar widget.
 Disable any previous automatic sleep plugin so only one sleep service runs.
 
@@ -181,9 +181,9 @@ qmllint Service.qml
 omarchy plugin validate .
 ```
 
-The runtime test loads the installed `/usr/share/omarchy/shell/Commons`; set
-`FOAMY_TEST_COMMONS` to another Omarchy `shell/Commons` directory to run it
-against that version.
+The runtime test targets Omarchy 4.5 and loads the installed
+`/usr/share/omarchy/shell/Commons`; set `FOAMY_TEST_COMMONS` to another Omarchy
+`shell/Commons` directory to run it against that tree.
 
 The runtime test uses a temporary home with mocked power, idle events, and
 system commands. It tests real Quickshell configuration watching and process
@@ -212,6 +212,6 @@ Provided **as is**, without warranty or guaranteed support. Use at your own risk
 
 ## Language
 
-Notifications follow **Omarchy → Setup → Language** on Omarchy 4.5 (English and
-Norwegian catalogs; missing translations fall back to English). Omarchy 4.0 shows
-them in English. The plugin does not set or override the Omarchy language.
+Notifications follow **Omarchy → Setup → Language** (English and Norwegian
+catalogs; missing translations fall back to English). The plugin does not set or
+override the Omarchy language.
