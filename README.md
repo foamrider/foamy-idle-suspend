@@ -181,9 +181,9 @@ qmllint Service.qml
 omarchy plugin validate .
 ```
 
-Set `FOAMY_TEST_COMMONS` to an Omarchy 4.5 `shell/Commons` directory to run the
-runtime test against that version. Shared foamy components (translations, IPC)
-live in `kit/`, copied from [foamy-kit](https://github.com/foamrider/foamy-kit).
+The runtime test loads the installed `/usr/share/omarchy/shell/Commons`; set
+`FOAMY_TEST_COMMONS` to another Omarchy `shell/Commons` directory to run it
+against that version.
 
 The runtime test uses a temporary home with mocked power, idle events, and
 system commands. It tests real Quickshell configuration watching and process
@@ -209,6 +209,8 @@ the plugin directory are retained unless you remove them separately.
 Licensed under [MIT](LICENSE).
 
 Provided **as is**, without warranty or guaranteed support. Use at your own risk.
+
+## Language
 
 Notifications follow **Omarchy → Setup → Language** on Omarchy 4.5 (English and
 Norwegian catalogs; missing translations fall back to English). Omarchy 4.0 shows
