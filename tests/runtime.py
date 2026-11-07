@@ -90,8 +90,12 @@ for name in ['hostnamectl', 'omarchy', 'systemctl', 'notify-send', 'busctl', 'om
 (base / 'can-CanSuspendThenHibernate').write_text('na')
 (base / 'can-CanHibernate').write_text('na')
 env = dict(os.environ, HOME=str(base), XDG_RUNTIME_DIR=str(runtime), QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='basic', QT_STYLE_OVERRIDE='Fusion', PATH=str(bin_dir) + ':' + os.environ['PATH'])
-env.pop('WAYLAND_DISPLAY', None)
-env.pop('DISPLAY', None)
+# Temporary XDG directories too: 4.5's Commons reads the language from the
+# config home, and the desktop's choice must not leak into the notifications.
+env.update(XDG_CONFIG_HOME=str(base / '.config'), XDG_STATE_HOME=str(base / '.local/state'),
+           XDG_CACHE_HOME=str(base / '.cache'), XDG_DATA_HOME=str(base / '.local/share'))
+for name in ('WAYLAND_DISPLAY', 'DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE', 'OMARCHY_LANGUAGE_FILE'):
+    env.pop(name, None)
 def write_config(extra=None, **settings):
     plugins = [{'id': 'foamy.idle-suspend', **settings}] + (extra or [])
     config.write_text(json.dumps({'version': 1, 'plugins': plugins}))
