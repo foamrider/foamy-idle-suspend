@@ -57,6 +57,14 @@ Item {
   property var notified: ({})
   property string fallbackNotified: ""
   readonly property int retryBaseMs: 60000
+  // How long systemctl may take to hand the sleep request to logind; it
+  // normally returns within a second or two (see suspendWatchdog).
+  readonly property int suspendWatchdogMs: 60000
+  // The sleep request in flight: suspendProcess's exit, its failure to start
+  // and the watchdog each settle it, and only the first one counts.
+  property bool suspendPending: false
+  property int suspendAttempts: 0
+  property double suspendStartedAt: 0
 
   function nowIso() {
     return new Date().toISOString()
@@ -192,7 +200,22 @@ Item {
     root.processError = ""
     suspendProcess.command = ["systemctl", root.effectiveAction]
     logEvent("suspend-request", root.attemptSource + " " + root.effectiveAction)
+    root.suspendAttempts += 1
+    suspendProcess.attempt = root.suspendAttempts
+    root.suspendPending = true
+    root.suspendStartedAt = Date.now()
+    suspendWatchdog.restart()
     suspendProcess.running = true
+  }
+
+  // The one way a sleep request ends; later calls for the same attempt
+  // (runningChanged after exited, the exit of a request the watchdog
+  // stopped) find nothing pending.
+  function settleSuspend(attempt, exitCode, errorText) {
+    if (!root.suspendPending || attempt !== root.suspendAttempts) return
+    root.suspendPending = false
+    suspendWatchdog.stop()
+    afterSuspend(exitCode, errorText)
   }
 
   function afterSuspend(exitCode, errorText) {
@@ -405,7 +428,15 @@ Item {
     root.stateRefreshPending = false
     // Do not act on stale Stay awake state while a refresh is in flight.
     root.stayAwakeStateKnown = false
+    stayAwakeProbe.exitSeen = false
     stayAwakeProbe.running = true
+  }
+
+  // A Stay awake read that failed: sleep stays off until a read succeeds.
+  function stayAwakeFailed(message) {
+    root.stayAwakeStateKnown = false
+    root.stayAwakeError = message
+    root.logEvent("idle-state-error", root.stayAwakeError)
   }
 
   FileView {
@@ -418,9 +449,11 @@ Item {
 
   Process {
     id: stayAwakeProbe
+    property bool exitSeen: false
     command: ["omarchy", "toggle", "idle", "status"]
     stdout: StdioCollector { id: awakeOutput; waitForEnd: true }
     onExited: function(exitCode) {
+      stayAwakeProbe.exitSeen = true
       try {
         if (exitCode !== 0) throw new Error("idle status exited " + exitCode)
         var state = JSON.parse(awakeOutput.text)
@@ -429,18 +462,37 @@ Item {
         root.stayAwakeError = ""
         root.stayAwakeStateKnown = true
       } catch (error) {
-        root.stayAwakeStateKnown = false
-        root.stayAwakeError = String(error)
-        root.logEvent("idle-state-error", root.stayAwakeError)
+        root.stayAwakeFailed(String(error))
       }
       stayAwakeWatcher.reload()
       // A change while the read was running needs another read of current state.
       if (root.stateRefreshPending) root.refreshStayAwakeState()
     }
+    // Not running without an exit: `omarchy` couldn't start (no exited()).
+    onRunningChanged: {
+      if (running || exitSeen) return
+      exitSeen = true
+      root.stayAwakeFailed("omarchy toggle idle status couldn't start")
+      stayAwakeWatcher.reload()
+      if (root.stateRefreshPending) root.refreshStayAwakeState()
+    }
+  }
+
+  function chassisRead(exitCode, text, errorText) {
+    root.chassis = String(text || "").trim() || "unknown"
+    root.isLaptop = exitCode === 0 && root.chassis === "laptop"
+    root.chassisLoaded = true
+    if (exitCode !== 0) {
+      root.processError = String(errorText || "hostnamectl chassis failed").trim()
+      root.logEvent("chassis-error", root.processError)
+    } else {
+      root.logEvent("chassis-ready", root.chassis)
+    }
   }
 
   Process {
     id: chassisProbe
+    property bool exitSeen: false
     command: ["hostnamectl", "chassis"]
     stdout: StdioCollector {
       id: chassisOutput
@@ -451,15 +503,15 @@ Item {
       waitForEnd: true
     }
     onExited: function(exitCode, exitStatus) {
-      root.chassis = String(chassisOutput.text || "").trim() || "unknown"
-      root.isLaptop = exitCode === 0 && root.chassis === "laptop"
-      root.chassisLoaded = true
-      if (exitCode !== 0) {
-        root.processError = String(chassisError.text || "hostnamectl chassis failed").trim()
-        root.logEvent("chassis-error", root.processError)
-      } else {
-        root.logEvent("chassis-ready", root.chassis)
-      }
+      chassisProbe.exitSeen = true
+      root.chassisRead(exitCode, chassisOutput.text, chassisError.text)
+    }
+    // Not running without an exit: hostnamectl couldn't start. Not a laptop
+    // as far as we know, like a failed hostnamectl.
+    onRunningChanged: {
+      if (running || exitSeen) return
+      exitSeen = true
+      root.chassisRead(-1, "", "hostnamectl chassis couldn't start")
     }
   }
 
@@ -508,12 +560,44 @@ Item {
 
   Process {
     id: suspendProcess
+    property int attempt: 0
     stderr: StdioCollector {
       id: suspendError
       waitForEnd: true
     }
     onExited: function(exitCode, exitStatus) {
-      root.afterSuspend(exitCode, suspendError.text)
+      root.settleSuspend(suspendProcess.attempt, exitCode, suspendError.text)
+    }
+    // After exited() this finds nothing pending. Without exited() before it
+    // (systemctl missing or not executable) the request never started.
+    onRunningChanged: if (!running)
+      root.settleSuspend(suspendProcess.attempt, -1, "systemctl " + root.effectiveAction + " couldn't start")
+  }
+
+  // A sleep request that never ends would leave phase "suspending" and
+  // automatic sleep off for good. Not GNU timeout: its clock counts time
+  // asleep, so it would fire right after a resume. Qt timers run on
+  // CLOCK_MONOTONIC, which stops while the computer sleeps, so this counts
+  // only time awake with systemctl still running (systemctl returns as soon
+  // as logind takes the request, or right after a resume if it is frozen
+  // mid-call). If the wall clock shows the computer slept meanwhile anyway,
+  // the request took effect: that counts as a completed sleep, not a failure.
+  Timer {
+    id: suspendWatchdog
+    interval: root.suspendWatchdogMs
+    repeat: false
+    onTriggered: {
+      if (!root.suspendPending) return
+      var attempt = root.suspendAttempts
+      // systemctl is the direct child: SIGKILL ends it (its exit is ignored).
+      if (suspendProcess.running) suspendProcess.signal(9)
+      if (Policy.sleptDuring(Date.now() - root.suspendStartedAt, root.suspendWatchdogMs)) {
+        root.logEvent("suspend-watchdog", "systemctl " + root.effectiveAction + " was still running after a sleep")
+        root.settleSuspend(attempt, 0, "")
+      } else {
+        root.settleSuspend(attempt, -1, "systemctl " + root.effectiveAction + " didn't finish within "
+          + Math.round(root.suspendWatchdogMs / 1000) + " seconds")
+      }
     }
   }
 

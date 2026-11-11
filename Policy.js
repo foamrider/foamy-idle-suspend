@@ -127,9 +127,18 @@ function retryDelayMs(failures, baseMs) {
   return Math.min(base * Math.pow(2, n), base * 15)
 }
 
+// The sleep request's watchdog counts time awake only (Qt timers run on
+// CLOCK_MONOTONIC). Fired with the wall clock well past that budget, the
+// computer slept (or the clock moved) while systemctl ran: the request took
+// effect. A clock set back reads as no sleep.
+function sleptDuring(wallElapsedMs, budgetMs) {
+  return Number(wallElapsedMs) > Number(budgetMs) + 30000
+}
+
 if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
   sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
+  sleptDuring: sleptDuring,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }

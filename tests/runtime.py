@@ -20,7 +20,13 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
                  ('import Quickshell.Services.Mpris\n', ''), ('import Quickshell.Wayland', ''),
                  ('UPower.onBattery', 'Mock.TestState.onBattery'), ('Mpris.players.values', 'Mock.TestState.players'),
                  ('  IdleMonitor {', '  Mock.IdleMonitor {'),
-                 ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700')]:
+                 ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700'),
+                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500'),
+                 # The mocks by absolute path: a mock that can't start must
+                 # never fall through to the real command on PATH.
+                 ('["systemctl", root.effectiveAction]', '["%s/systemctl", root.effectiveAction]' % bin_dir),
+                 ('["omarchy", "toggle", "idle", "status"]', '["%s/omarchy", "toggle", "idle", "status"]' % bin_dir),
+                 ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir)]:
     assert old in service, old
     service = service.replace(old, new)
 (app / 'Service.qml').write_text(service)
@@ -78,6 +84,7 @@ else:
         elif reply == 'ok': (home / 'locked').touch()
         print(reply)
     if name == 'systemctl':
+        if (home / 'hang-sleep').exists(): time.sleep(30)
         time.sleep(0.1)
         (home / 'locked').unlink(missing_ok=True)  # the next attempt must lock again
         (home / 'locked-at').unlink(missing_ok=True)
@@ -136,7 +143,8 @@ try:
     order = [line[0] for line in recorded() if line[0] in ('omarchy-shell', 'systemctl')]
     assert order[:2] == ['omarchy-shell', 'systemctl'], order
     assert sleep_calls() == [['systemctl', 'suspend']]
-    assert wait_for(lambda s: s['phase'] == 'idle')['lastLockResult'] == 'secure'
+    value = wait_for(lambda s: s['phase'] == 'idle')
+    assert value['lastLockResult'] == 'secure' and value['failureStreak'] == 0 and value['lastError'] == '', value
     # Woken without input and still idle: ask again after the retry delay.
     wait_for(lambda s: len(sleep_calls()) == 2, timeout=4)
     active()
@@ -268,6 +276,31 @@ try:
     active(False)
     (base / 'fail-sleep').unlink()
     print('PASS: unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off')
+    # A sleep request that never ends: the watchdog stops it and reports it
+    # once (the killed request's exit changes nothing).
+    def log_count(text): return (base / 'runtime.log').read_text().count(text)
+    (base / 'hang-sleep').touch()
+    count = len(sleep_calls())
+    ipc('test', 'state', False, True, False)
+    wait_for(lambda s: s['phase'] == 'suspending' and s['suspendRunning'])
+    wait_for(lambda s: "didn't finish within 2 seconds" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'], timeout=4)
+    time.sleep(0.4)
+    value = status()
+    assert value['failureStreak'] == 1 and value['retryInMs'] == 1400 and not value['suspendRunning'] and value['phase'] == 'idle', value
+    assert log_count("suspend-error: systemctl suspend didn't finish") == 1 and len(sleep_calls()) == count + 1
+    (base / 'hang-sleep').unlink()
+    active(False)
+    # A sleep command that can't start (no exited()) ends the attempt too.
+    systemctl = bin_dir / 'systemctl'; systemctl.chmod(0o644)
+    count = len(sleep_calls())
+    ipc('test', 'state', False, True, False)
+    value = wait_for(lambda s: "couldn't start" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'])
+    assert value['failureStreak'] == 1 and len(sleep_calls()) == count, value
+    assert log_count("suspend-error: systemctl suspend couldn't start") == 1
+    systemctl.chmod(0o755)
+    wait_for(lambda s: len(sleep_calls()) == count + 1 and s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '', timeout=4)
+    active(False)
+    print('PASS: a hung or unstartable sleep command ends the attempt with one report and a retry')
     awake = state_dir / 'stay-awake'; awake.touch()
     wait_for(lambda s: s['stayAwake'] is True and not s['enabled'])
     # notify-send runs detached; give it a moment to record the call.
@@ -288,6 +321,10 @@ try:
     wait_for(lambda s: s['stayAwake'] is None and not s['enabled'] and 'SyntaxError' in s['lastError'])
     (base / 'bad-state').unlink(); (state_dir / 'refresh').unlink()
     wait_for(lambda s: s['enabled'])
+    omarchy = bin_dir / 'omarchy'; omarchy.chmod(0o644); (state_dir / 'refresh').touch()
+    wait_for(lambda s: s['stayAwake'] is None and not s['enabled'] and "couldn't start" in s['lastError'])
+    omarchy.chmod(0o755); (state_dir / 'refresh').unlink()
+    wait_for(lambda s: s['enabled'] and s['stayAwake'] is False and s['lastError'] == '')
     write_config(batteryTimeoutSec=None, acTimeoutSec=None)
     wait_for(lambda s: s['configValid'] and not s['enabled'] and s['policy']['batteryTimeoutSec'] is None)
     for battery in (True, False):
@@ -302,7 +339,16 @@ try:
     assert len(notes()) == before, 'an inert plugin must not notify'
     write_config(acTimeoutSec=0)
     wait_for(lambda s: not s['configValid'] and not s['enabled'] and 'acTimeoutSec' in s['lastError'])
-    print('PASS: Stay awake (announced only when active), invalid configuration/state, disabled timeouts')
+    print('PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start, disabled timeouts')
+    # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
+    process.terminate(); process.wait(timeout=5)
+    write_config()
+    (bin_dir / 'hostnamectl').unlink()
+    process = subprocess.Popen(['qs', '-p', str(app), '--no-color'], env=env, stdout=log, stderr=log)
+    value = wait_for(lambda s: s['chassisLoaded'] and s['stayAwake'] is False)
+    assert value['chassis'] == 'unknown' and not value['isLaptop'] and not value['enabled'], value
+    assert value['lastError'] == "hostnamectl chassis couldn't start", value
+    print('PASS: a chassis probe that cannot start is reported and keeps a laptops-only policy off')
 finally:
     process.terminate()
     try: process.wait(timeout=3)
