@@ -21,13 +21,20 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
                  ('UPower.onBattery', 'Mock.TestState.onBattery'), ('Mpris.players.values', 'Mock.TestState.players'),
                  ('  IdleMonitor {', '  Mock.IdleMonitor {'),
                  ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700'),
-                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500'),
-                 # The mocks by absolute path: a mock that can't start must
-                 # never fall through to the real command on PATH.
-                 ('["systemctl", root.effectiveAction]', '["%s/systemctl", root.effectiveAction]' % bin_dir),
-                 ('["omarchy", "toggle", "idle", "status"]', '["%s/omarchy", "toggle", "idle", "status"]' % bin_dir),
-                 ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir)]:
+                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500')]:
     assert old in service, old
+    service = service.replace(old, new)
+# Every command the service runs, by absolute path to its mock, with the
+# number of places that run it: a mock that can't start must never fall
+# through to the real command on PATH, and a new call site must be added here.
+for old, new, places in [('["systemctl", root.effectiveAction]', '["%s/systemctl", root.effectiveAction]' % bin_dir, 1),
+                         ('["omarchy", "toggle", "idle", "status"]', '["%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
+                         ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
+                         ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
+                         ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
+                         ('busctl --system --json=short call', '%s/busctl --system --json=short call' % bin_dir, 1),
+                         ('omarchy-shell lock ', '%s/omarchy-shell lock ' % bin_dir, 2)]:
+    assert service.count(old) == places, (old, service.count(old))
     service = service.replace(old, new)
 (app / 'Service.qml').write_text(service)
 (mock / 'qmldir').write_text('module Mock\nsingleton TestState 1.0 State.qml\nIdleMonitor 1.0 IdleMonitor.qml\n')
@@ -96,7 +103,17 @@ for name in ['hostnamectl', 'omarchy', 'systemctl', 'notify-send', 'busctl', 'om
 # This machine (and most stock installs) cannot hibernate.
 (base / 'can-CanSuspendThenHibernate').write_text('na')
 (base / 'can-CanHibernate').write_text('na')
-env = dict(os.environ, HOME=str(base), XDG_RUNTIME_DIR=str(runtime), QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='basic', QT_STYLE_OVERRIDE='Fusion', PATH=str(bin_dir) + ':' + os.environ['PATH'])
+# Without an AppImage's bundled binaries and libraries ($APPDIR, for example
+# an editor's) on the search paths: qs and the mocks must load the host's.
+appdir = os.path.realpath(os.environ['APPDIR']) if os.environ.get('APPDIR') else None
+def host_dirs(value):
+    def kept(entry):
+        real = os.path.realpath(entry)
+        return not (appdir and (real == appdir or real.startswith(appdir + '/')))
+    return ':'.join(p for p in value.split(':') if p and kept(p))
+env = dict(os.environ, HOME=str(base), XDG_RUNTIME_DIR=str(runtime), QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='basic', QT_STYLE_OVERRIDE='Fusion',
+           PATH=str(bin_dir) + ':' + host_dirs(os.environ['PATH']), LD_LIBRARY_PATH=host_dirs(os.environ.get('LD_LIBRARY_PATH', '')))
+if not env['LD_LIBRARY_PATH']: del env['LD_LIBRARY_PATH']
 # Temporary XDG directories too: 4.5's Commons reads the language from the
 # config home, and the desktop's choice must not leak into the notifications.
 env.update(XDG_CONFIG_HOME=str(base / '.config'), XDG_STATE_HOME=str(base / '.local/state'),
