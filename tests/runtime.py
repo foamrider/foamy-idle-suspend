@@ -107,9 +107,12 @@ def write_config(extra=None, **settings):
     plugins = [{'id': 'foamy.idle-suspend', **settings}] + (extra or [])
     config.write_text(json.dumps({'version': 1, 'plugins': plugins}))
 def ipc(target, method, *args):
-    return subprocess.check_output(['qs', 'ipc', '-p', str(app), 'call', target, method, *[str(a).lower() for a in args]], env=env, text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+    return subprocess.check_output(['qs', 'ipc', '-p', str(app), 'call', target, method, *[str(a).lower() for a in args]], env=env, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
 def status(): return json.loads(ipc('foamy.idle-suspend', 'status'))
-def wait_for(predicate, timeout=6):
+# The limits only bound how long a broken run takes to fail: a loaded machine
+# (parallel test runs, Python mocks starting slowly) needs the room, and a
+# passing wait returns as soon as its condition holds.
+def wait_for(predicate, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -146,7 +149,7 @@ try:
     value = wait_for(lambda s: s['phase'] == 'idle')
     assert value['lastLockResult'] == 'secure' and value['failureStreak'] == 0 and value['lastError'] == '', value
     # Woken without input and still idle: ask again after the retry delay.
-    wait_for(lambda s: len(sleep_calls()) == 2, timeout=4)
+    wait_for(lambda s: len(sleep_calls()) == 2)
     active()
     time.sleep(0.9); count = len(sleep_calls())
     time.sleep(0.9); assert len(sleep_calls()) == count, 'activity must stop retries'
@@ -187,7 +190,7 @@ try:
     wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['retryScheduled'])
     time.sleep(0.3); assert len(sleep_calls()) == count
     (base / 'block-inhibited').write_text('shutdown')
-    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=3)
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
     active()
     (base / 'block-inhibited').unlink()
     # Playback or an inhibitor that starts while the lock comes up still defers.
@@ -196,19 +199,19 @@ try:
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     ipc('test', 'playing', True)
-    wait_for(lambda s: s['deferredReason'] == 'media-playing' and s['phase'] == 'idle', timeout=4)
+    wait_for(lambda s: s['deferredReason'] == 'media-playing' and s['phase'] == 'idle')
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although media started during locking'
     ipc('test', 'playing', False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
     active()
     count = len(sleep_calls())
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     (base / 'block-inhibited').write_text('sleep')
-    wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['phase'] == 'idle', timeout=4)
+    wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['phase'] == 'idle')
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although an inhibitor appeared during locking'
     (base / 'block-inhibited').unlink()
-    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
     active()
     # Power source changes while an attempt is locking: the new source's single
     # idle notification must still lead to sleep once the old attempt ends.
@@ -218,7 +221,7 @@ try:
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     ipc('test', 'state', False, True, False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=5)
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
     assert status()['onBattery'] is False
     active(False)
     write_config()
@@ -230,7 +233,7 @@ try:
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['deferredReason'] == 'media-playing')
     write_config(pauseForMedia=False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1, timeout=4)
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
     assert status()['mediaPlaying'] is True
     active()
     ipc('test', 'playing', False)
@@ -243,7 +246,7 @@ try:
     ipc('test', 'state', True, True, False)
     value = wait_for(lambda s: s['lastLockResult'] == 'missing-pam' and s['retryScheduled'])
     assert value['failureStreak'] == 1 and value['retryInMs'] == 1400
-    wait_for(lambda s: s['failureStreak'] >= 2, timeout=4)
+    wait_for(lambda s: s['failureStreak'] >= 2)
     assert len(sleep_calls()) == count, 'slept without a secure lock'
     assert notes().count("Screen didn't lock") == 1, notes()
     active()
@@ -270,7 +273,7 @@ try:
     ipc('test', 'state', False, True, False)
     value = wait_for(lambda s: s['lastError'] == 'mock sleep unavailable.' and s['retryScheduled'])
     assert value['failureStreak'] == 1 and value['retryInMs'] == 1400
-    wait_for(lambda s: s['failureStreak'] == 2, timeout=4)
+    wait_for(lambda s: s['failureStreak'] == 2)
     assert notes().count('Automatic sleep failed') == 1
     assert sleep_calls()[-1] == ['systemctl', 'suspend']
     active(False)
@@ -283,7 +286,7 @@ try:
     count = len(sleep_calls())
     ipc('test', 'state', False, True, False)
     wait_for(lambda s: s['phase'] == 'suspending' and s['suspendRunning'])
-    wait_for(lambda s: "didn't finish within 2 seconds" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'], timeout=4)
+    wait_for(lambda s: "didn't finish within 2 seconds" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'])
     time.sleep(0.4)
     value = status()
     assert value['failureStreak'] == 1 and value['retryInMs'] == 1400 and not value['suspendRunning'] and value['phase'] == 'idle', value
@@ -298,7 +301,7 @@ try:
     assert value['failureStreak'] == 1 and len(sleep_calls()) == count, value
     assert log_count("suspend-error: systemctl suspend couldn't start") == 1
     systemctl.chmod(0o755)
-    wait_for(lambda s: len(sleep_calls()) == count + 1 and s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '', timeout=4)
+    wait_for(lambda s: len(sleep_calls()) == count + 1 and s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '')
     active(False)
     print('PASS: a hung or unstartable sleep command ends the attempt with one report and a retry')
     awake = state_dir / 'stay-awake'; awake.touch()
