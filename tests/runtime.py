@@ -272,6 +272,16 @@ try:
     assert len(sleep_calls()) == count, 'slept without a secure lock'
     assert notes().count("Screen didn't lock") == 1, notes()
     active()
+    # A lock that never reports secure ends in a timeout (the status poll runs
+    # out, or the outer timeout stops it): no sleep either.
+    (base / 'lock-reply').write_text('failed')
+    ipc('test', 'state', True, True, False)
+    value = wait_for(lambda s: s['lastLockResult'] == 'timeout' and s['phase'] == 'idle')
+    assert value['failureStreak'] >= 1 and value['lastError'] == 'The screen did not lock (timeout)', value
+    assert len(sleep_calls()) == count, 'slept although the lock timed out'
+    # notify-send runs detached: wait for it to record the call.
+    wait_for(lambda s: notes().count("Screen didn't lock") == 2)
+    active()
     (base / 'lock-reply').unlink()
     write_config(lockBeforeSuspend=False)
     wait_for(lambda s: s['policy']['lockBeforeSuspend'] is False)
@@ -280,7 +290,7 @@ try:
     wait_for(lambda s: len(sleep_calls()) == count + 1)
     assert len(recorded('omarchy-shell')) == locks, 'lockBeforeSuspend false must not lock'
     active()
-    print('PASS: missing lock refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking')
+    print('PASS: missing lock or a lock that times out refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking')
     # Hibernation not set up: fall back to suspend and say so once.
     write_config(suspendAction='suspend-then-hibernate')
     value = wait_for(lambda s: s['actionFallback'] and s['effectiveAction'] == 'suspend')
