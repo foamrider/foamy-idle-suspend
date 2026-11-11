@@ -119,8 +119,9 @@ When the configured idle timeout expires, the plugin:
 3. checks media and inhibitors again (they may have started while the screen was
    locking) and then calls `systemctl` with the selected sleep action.
 
-If the lock or the sleep request fails, a notification says so once, and the
-plugin tries again while the computer stays idle: after one minute, doubling up
+If the lock or the sleep request fails (including a `systemctl` that can't
+start, or one still running after a minute awake; time asleep doesn't count),
+a notification says so once, and the plugin tries again while the computer stays idle: after one minute, doubling up
 to fifteen minutes. After a successful request it also checks again a minute
 later, so a wake without input (an RTC alarm, a USB device, the lid) does not
 leave the computer awake on battery. Any input stops the retries. Enabling the plugin enables this automatic policy;
@@ -187,7 +188,8 @@ The runtime test targets Omarchy 4.5 and loads the installed
 
 The runtime test uses a temporary home with mocked power, idle events, and
 system commands. It tests real Quickshell configuration watching and process
-handling, including invalid settings and failed sleep requests. It requires
+handling, including invalid settings, failed, hung and unstartable sleep
+requests, and status commands that can't start. It requires
 local IPC socket access and never suspends the machine. Actual compositor idle
 delivery and physical suspend/resume need separate validation on a target machine.
 

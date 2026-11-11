@@ -98,6 +98,13 @@ test('retries back off from one minute to at most fifteen', () => {
   assert.equal(Policy.retryDelayMs(1, 700), 1400);
 });
 
+test('the sleep watchdog treats a fire after a sleep as a completed request', () => {
+  assert.equal(Policy.sleptDuring(60050, 60000), false);
+  assert.equal(Policy.sleptDuring(89000, 60000), false);
+  assert.equal(Policy.sleptDuring(8 * 3600000, 60000), true);
+  assert.equal(Policy.sleptDuring(-3600000, 60000), false, 'a clock set back is no sleep');
+});
+
 test('only effective changes count as a new configuration', () => {
   const a = parse(), b = parse();
   assert.equal(Policy.sameConfiguration(a, b), true);
