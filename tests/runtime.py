@@ -103,9 +103,14 @@ env.update(XDG_CONFIG_HOME=str(base / '.config'), XDG_STATE_HOME=str(base / '.lo
            XDG_CACHE_HOME=str(base / '.cache'), XDG_DATA_HOME=str(base / '.local/share'))
 for name in ('WAYLAND_DISPLAY', 'DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE', 'OMARCHY_LANGUAGE_FILE'):
     env.pop(name, None)
+# Atomic, like the shell's own shell.json writes (FileView atomicWrites): an
+# in-place write can be read half-done, which pauses sleep for a moment and
+# restarts the idle countdown.
 def write_config(extra=None, **settings):
     plugins = [{'id': 'foamy.idle-suspend', **settings}] + (extra or [])
-    config.write_text(json.dumps({'version': 1, 'plugins': plugins}))
+    replacement = config.with_suffix('.tmp')
+    replacement.write_text(json.dumps({'version': 1, 'plugins': plugins}))
+    replacement.replace(config)
 def ipc(target, method, *args):
     return subprocess.check_output(['qs', 'ipc', '-p', str(app), 'call', target, method, *[str(a).lower() for a in args]], env=env, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
 def status(): return json.loads(ipc('foamy.idle-suspend', 'status'))
