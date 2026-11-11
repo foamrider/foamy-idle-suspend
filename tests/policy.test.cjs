@@ -150,3 +150,22 @@ test('auto uses suspend-then-hibernate only where logind says yes, else suspend'
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'na', suspend: 'yes' }), { action: 'suspend', fallback: true });
   assert.deepEqual(Policy.CHOICES, ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']);
 });
+
+test('logind action answers are read per Can* method; failed or malformed calls stay unknown', () => {
+  const reply = answer => JSON.stringify({ type: 's', data: [answer] });
+  assert.deepEqual(Policy.parseActionSupport([
+    'CanSuspend ' + reply('yes'), 'CanHibernate ' + reply('na'),
+    'CanHybridSleep ' + reply('challenge'), 'CanSuspendThenHibernate ' + reply('no'), ''
+  ].join('\n')), { suspend: 'yes', hibernate: 'na', 'hybrid-sleep': 'challenge', 'suspend-then-hibernate': 'no' });
+  // The probe prints "{}" for a call that failed; that action is left to systemctl.
+  assert.deepEqual(Policy.parseActionSupport('CanSuspend {}\nCanHibernate ' + reply('na')), { hibernate: 'na' });
+  for (const text of ['', null, undefined, 'CanSuspend', 'CanSuspend {', 'CanSuspend null', 'CanSuspend ' + reply(''),
+    'CanReboot ' + reply('yes'), 'canSuspend ' + reply('yes')])
+    assert.deepEqual(Policy.parseActionSupport(text), {}, String(text));
+});
+
+test('BlockInhibited is read from busctl output, empty when it does not parse', () => {
+  assert.equal(Policy.parseBlockInhibited('{"type":"s","data":"handle-lid-switch:idle"}'), 'handle-lid-switch:idle');
+  for (const text of ['', '{', 'null', '{}', '{"type":"s","data":""}', undefined])
+    assert.equal(Policy.parseBlockInhibited(text), '', String(text));
+});

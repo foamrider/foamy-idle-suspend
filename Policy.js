@@ -97,6 +97,32 @@ function blockedByInhibitor(blockInhibited) {
   return what.indexOf("idle") !== -1 || what.indexOf("sleep") !== -1
 }
 
+// The action probe's output: one "<CanMethod> <busctl --json=short reply>"
+// line per method, "{}" when the call failed. Returns the answer per action
+// (see usable); lines that don't parse or name another method are skipped,
+// so a failed call leaves its action unknown.
+function parseActionSupport(text) {
+  var answers = {}
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var space = lines[i].indexOf(" ")
+    if (space < 0) continue
+    var method = lines[i].slice(0, space)
+    var answer = ""
+    try { answer = String(JSON.parse(lines[i].slice(space + 1)).data[0] || "") } catch (error) { answer = "" }
+    for (var a = 0; a < ACTIONS.length; a++) {
+      if (CAN_METHODS[ACTIONS[a]] === method && answer) answers[ACTIONS[a]] = answer
+    }
+  }
+  return answers
+}
+
+// logind's BlockInhibited property as busctl --json=short prints it; empty
+// when the reply doesn't parse (see blockedByInhibitor).
+function parseBlockInhibited(text) {
+  try { return String(JSON.parse(text).data || "") } catch (error) { return "" }
+}
+
 // Answers from logind's Can* methods: "yes", "challenge" (allowed after
 // authentication), "no", "na". Unknown answers (probe failed) are trusted
 // and left to systemctl. An unavailable action falls back to suspend.
@@ -139,6 +165,6 @@ if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
   sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
-  sleptDuring: sleptDuring,
+  sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, parseBlockInhibited: parseBlockInhibited,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }

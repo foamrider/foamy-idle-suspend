@@ -149,8 +149,7 @@ Item {
 
   function afterInhibitorCheck(text) {
     var source = root.attemptSource
-    var value = ""
-    try { value = String(JSON.parse(text).data || "") } catch (error) { value = "" }
+    var value = Policy.parseBlockInhibited(text)
     root.blockInhibited = value
     if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
     if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
@@ -269,20 +268,8 @@ Item {
   }
 
   function applyActionProbe(text) {
-    var answers = {}
-    var lines = String(text || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var space = lines[i].indexOf(" ")
-      if (space < 0) continue
-      var method = lines[i].slice(0, space)
-      var answer = ""
-      try { answer = String(JSON.parse(lines[i].slice(space + 1)).data[0] || "") } catch (error) { answer = "" }
-      for (var a = 0; a < Policy.ACTIONS.length; a++) {
-        if (Policy.CAN_METHODS[Policy.ACTIONS[a]] === method && answer) answers[Policy.ACTIONS[a]] = answer
-      }
-    }
-    root.actionSupport = answers
-    logEvent("actions", JSON.stringify(answers))
+    root.actionSupport = Policy.parseActionSupport(text)
+    logEvent("actions", JSON.stringify(root.actionSupport))
   }
 
   onActionChoiceChanged: {
