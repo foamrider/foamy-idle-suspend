@@ -150,7 +150,9 @@ browsers playing video), logind block inhibitors and MPRIS playback pause
 automatic sleep. Apps that only call `org.freedesktop.ScreenSaver.Inhibit` are not
 covered: Omarchy runs no service under that D-Bus name, so those calls reach
 nobody. When the plugin would put this computer to sleep, it also shows a
-notification when Stay awake changes.
+notification when Stay awake changes. While the Stay awake state can't be read
+(`omarchy toggle idle status` fails or takes longer than 5 seconds), automatic
+sleep stays off and status shows why in `lastError`.
 Screensaver and lock timings remain under stock `idle.screensaver` and
 `idle.lock`. Keep Omarchy's idle and lock services enabled; locking before sleep
 remains the responsibility of Omarchy's existing sleep/lock setup.

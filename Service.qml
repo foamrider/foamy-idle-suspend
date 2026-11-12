@@ -21,6 +21,9 @@ Item {
   readonly property string stayAwakeStateDir: Quickshell.env("HOME") + "/.local/state/omarchy/indicators"
   readonly property bool idleEnabled: stayAwakeStateKnown && !lastStayAwake
   property bool stateRefreshPending: false
+  // Deadline for `omarchy toggle idle status` (it normally answers in tens
+  // of milliseconds); a hung read would otherwise keep sleep off silently.
+  readonly property int stayAwakeTimeoutSec: 5
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -458,25 +461,32 @@ Item {
   Process {
     id: stayAwakeProbe
     property bool exitSeen: false
-    command: ["omarchy", "toggle", "idle", "status"]
+    command: ["timeout", "--kill-after=1s", root.stayAwakeTimeoutSec + "s", "omarchy", "toggle", "idle", "status"]
     stdout: StdioCollector { id: awakeOutput; waitForEnd: true }
     onExited: function(exitCode) {
       stayAwakeProbe.exitSeen = true
-      try {
-        if (exitCode !== 0) throw new Error("idle status exited " + exitCode)
-        var state = JSON.parse(awakeOutput.text)
-        if (typeof state.enabled !== "boolean") throw new Error("idle status missing enabled")
-        root.syncStayAwakeNotification(state.enabled)
-        root.stayAwakeError = ""
-        root.stayAwakeStateKnown = true
-      } catch (error) {
-        root.stayAwakeFailed(String(error))
+      // timeout's own codes: 124/137 the deadline, 126/127 omarchy couldn't run.
+      if (exitCode === 124 || exitCode === 137) {
+        root.stayAwakeFailed("omarchy toggle idle status didn't finish within " + root.stayAwakeTimeoutSec + " seconds")
+      } else if (exitCode === 126 || exitCode === 127) {
+        root.stayAwakeFailed("omarchy toggle idle status couldn't start")
+      } else {
+        try {
+          if (exitCode !== 0) throw new Error("idle status exited " + exitCode)
+          var state = JSON.parse(awakeOutput.text)
+          if (typeof state.enabled !== "boolean") throw new Error("idle status missing enabled")
+          root.syncStayAwakeNotification(state.enabled)
+          root.stayAwakeError = ""
+          root.stayAwakeStateKnown = true
+        } catch (error) {
+          root.stayAwakeFailed(String(error))
+        }
       }
       stayAwakeWatcher.reload()
       // A change while the read was running needs another read of current state.
       if (root.stateRefreshPending) root.refreshStayAwakeState()
     }
-    // Not running without an exit: `omarchy` couldn't start (no exited()).
+    // Not running without an exit: `timeout` couldn't start (no exited()).
     onRunningChanged: {
       if (running || exitSeen) return
       exitSeen = true

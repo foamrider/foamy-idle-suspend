@@ -26,14 +26,15 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
                  ('UPower.onBattery', 'Mock.TestState.onBattery'), ('Mpris.players.values', 'Mock.TestState.players'),
                  ('  IdleMonitor {', '  Mock.IdleMonitor {'),
                  ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700'),
-                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500')]:
+                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500'),
+                 ('readonly property int stayAwakeTimeoutSec: 5', 'readonly property int stayAwakeTimeoutSec: 2')]:
     assert old in service, old
     service = service.replace(old, new)
 # Every command the service runs, by absolute path to its mock, with the
 # number of places that run it: a mock that can't start must never fall
 # through to the real command on PATH, and a new call site must be added here.
 for old, new, places in [('["systemctl", ', '["%s/systemctl", ' % bin_dir, 1),
-                         ('["omarchy", "toggle", "idle", "status"]', '["%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
+                         ('"omarchy", "toggle", "idle", "status"]', '"%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
                          ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
                          ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
                          ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
@@ -76,6 +77,7 @@ def read(file, default):
     return path.read_text().strip() if path.exists() else default
 if name == 'hostnamectl': print('laptop')
 elif name == 'omarchy':
+    if (home / 'hang-state').exists(): time.sleep(30)
     if (home / 'bad-state').exists(): print('invalid state')
     else: print(json.dumps({'enabled': (home / '.local/state/omarchy/indicators/stay-awake').exists()}))
 elif name == 'busctl':
@@ -424,6 +426,13 @@ try:
     wait_for(lambda s: s['stayAwake'] is None and not s['enabled'] and "couldn't start" in s['lastError'])
     omarchy.chmod(0o755); (state_dir / 'refresh').unlink()
     wait_for(lambda s: s['enabled'] and s['stayAwake'] is False and s['lastError'] == '')
+    # A status command that hangs is stopped at its deadline and said so;
+    # sleep stays off until a read succeeds.
+    (base / 'hang-state').touch(); (state_dir / 'refresh').touch()
+    value = wait_for(lambda s: s['stayAwake'] is None and "didn't finish" in s['lastError'])
+    assert not value['enabled'] and value['lastError'] == "omarchy toggle idle status didn't finish within 2 seconds", value
+    (base / 'hang-state').unlink(); (state_dir / 'refresh').unlink()
+    wait_for(lambda s: s['enabled'] and s['stayAwake'] is False and s['lastError'] == '')
     write_config(batteryTimeoutSec=None, acTimeoutSec=None)
     wait_for(lambda s: s['configValid'] and not s['enabled'] and s['policy']['batteryTimeoutSec'] is None)
     for battery in (True, False):
@@ -438,7 +447,7 @@ try:
     assert len(notes()) == before, 'an inert plugin must not notify'
     write_config(acTimeoutSec=0)
     wait_for(lambda s: not s['configValid'] and not s['enabled'] and 'acTimeoutSec' in s['lastError'])
-    print('PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start, disabled timeouts')
+    print('PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, disabled timeouts')
     # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
     process.terminate(); process.wait(timeout=5)
     write_config()
