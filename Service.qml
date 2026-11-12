@@ -419,6 +419,38 @@ Item {
     if (root.deferredReason !== "") Qt.callLater(resumeIfIdle)
   }
 
+  // A tool that rewrites shell.json in place (truncate, then write, as with
+  // `jq … > shell.json`) can be read half-done; the shell itself writes
+  // atomically. Text that isn't JSON at all keeps the configuration in force
+  // and is read once more after configRereadMs; only an unreadable re-read
+  // applies the error. A complete but invalid entry applies at once.
+  readonly property int configRereadMs: 250
+  property bool configReread: false
+
+  function configLoaded(text) {
+    var next = Policy.parseConfig(text)
+    if (!next.valid && !Policy.parsesAsJson(text) && !root.configReread) {
+      if (!configRereadTimer.running) {
+        root.logEvent("config-partial", "reading shell.json again in " + root.configRereadMs + " ms")
+        configRereadTimer.restart()
+      }
+      return
+    }
+    configRereadTimer.stop()
+    root.configReread = false
+    root.applyConfiguration(next)
+  }
+
+  Timer {
+    id: configRereadTimer
+    interval: root.configRereadMs
+    repeat: false
+    onTriggered: {
+      root.configReread = true
+      configFile.reload()
+    }
+  }
+
   // The scoped service API can write this plugin's plugins[] entry
   // (shell.updateEntryInline) but offers no way to read it. Watch the same
   // file as the stock shell so edits apply without private host access.
@@ -429,8 +461,12 @@ Item {
     printErrors: false
     // The last configuration stays in force while the file is re-read.
     onFileChanged: reload()
-    onLoaded: root.applyConfiguration(Policy.parseConfig(text()))
-    onLoadFailed: root.applyConfiguration({ valid: false, settings: Policy.defaults(), error: "Cannot read " + root.configPath })
+    onLoaded: root.configLoaded(text())
+    onLoadFailed: {
+      configRereadTimer.stop()
+      root.configReread = false
+      root.applyConfiguration({ valid: false, settings: Policy.defaults(), error: "Cannot read " + root.configPath, unknownKeys: [] })
+    }
   }
 
   // Use Omarchy's persisted state rather than a restricted cross-plugin API.

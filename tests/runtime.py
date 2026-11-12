@@ -27,7 +27,8 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
                  ('  IdleMonitor {', '  Mock.IdleMonitor {'),
                  ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700'),
                  ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 4000'),
-                 ('readonly property int stayAwakeTimeoutSec: 5', 'readonly property int stayAwakeTimeoutSec: 2')]:
+                 ('readonly property int stayAwakeTimeoutSec: 5', 'readonly property int stayAwakeTimeoutSec: 2'),
+                 ('readonly property int configRereadMs: 250', 'readonly property int configRereadMs: 3000')]:
     assert old in service, old
     service = service.replace(old, new)
 # Every command the service runs, by absolute path to its mock, with the
@@ -248,6 +249,30 @@ try:
     write_config()
     wait_for(lambda s: s['policy']['lockBeforeSuspend'] is True)
     assert int(ipc('test', 'arms')) == arms and status()['configValid'], 'unrelated writes restarted the countdown'
+    # A tool that rewrites shell.json in place (truncate, then write) can be
+    # read half-done: the configuration in force stays, and the file is read
+    # again (after 3 s here, 250 ms in the shell) before an error counts.
+    def log_text(): return (base / 'runtime.log').read_text(errors='replace')
+    def log_shows(text, start):
+        return harness.wait_for(lambda: text in log_text()[start:], 30, stop=lambda: process.poll() is not None)
+    start = len(log_text())
+    full = json.dumps({'version': 1, 'plugins': [{'id': 'foamy.idle-suspend', 'acTimeoutSec': 1700}]})
+    with config.open('w') as f:
+        f.write(full[:25]); f.flush()
+        assert log_shows('config-partial', start), log_text()[start:]
+        assert status()['configValid'], 'a half-written file replaced the configuration'
+        f.write(full[25:])
+    value = wait_for(lambda s: s['policy']['acTimeoutSec'] == 1700 and s['configValid'])
+    assert 'config-error' not in log_text()[start:], log_text()[start:]
+    assert int(ipc('test', 'arms')) == arms, 'an in-place write restarted the countdown'
+    # A file that stays unreadable takes effect after the re-read.
+    start = len(log_text())
+    with config.open('w') as f: f.write('{"version": 1, "plugins": [')
+    assert log_shows('config-partial', start), log_text()[start:]
+    value = wait_for(lambda s: not s['configValid'])
+    assert 'JSON' in value['lastError'] and not value['enabled'], value
+    write_config()
+    wait_for(lambda s: s['configValid'] and s['policy']['acTimeoutSec'] is None)
     # Media playback defers sleep until it stops.
     ipc('test', 'playing', True)
     count = len(sleep_calls())
@@ -344,7 +369,7 @@ try:
     ipc('test', 'playing', False)
     write_config()
     wait_for(lambda s: s['policy']['pauseForMedia'] is True)
-    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep')
+    print('PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep')
     # No secure lock, no sleep: notify once and retry while idle.
     (base / 'lock-reply').write_text('missing-pam')
     count = len(sleep_calls())

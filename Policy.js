@@ -75,6 +75,12 @@ function parseConfig(text) {
   }
 }
 
+// Whether text is JSON at all. shell.json text that isn't may be a write
+// still in progress (truncated, then rewritten in place), see Service.qml.
+function parsesAsJson(text) {
+  try { JSON.parse(text); return true } catch (error) { return false }
+}
+
 // Same effective configuration: a write to shell.json that changes nothing
 // here (bar edits, other plugins) must not restart the idle countdown.
 function sameConfiguration(a, b) {
@@ -187,7 +193,7 @@ function sleptDuring(wallElapsedMs, budgetMs) {
 
 if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
-  sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
+  sameConfiguration: sameConfiguration, parsesAsJson: parsesAsJson, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
   sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, readBlockInhibited: readBlockInhibited,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS

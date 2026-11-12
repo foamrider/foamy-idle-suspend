@@ -144,7 +144,10 @@ Keys on the entry that aren't settings (a typo such as `batterytimeoutSec`
 leaves `batteryTimeoutSec` at its default) don't make it invalid; status lists
 them as `unknownKeys`, and the shell log names them (`config-unknown-keys`).
 Writes that do not change this plugin's settings (bar edits, other plugins) do
-not restart the idle countdown.
+not restart the idle countdown. A file that is momentarily not JSON at all,
+as when a tool rewrites it in place (`jq … > shell.json`), keeps the settings
+in force and is read again after about 250 ms; only if it is still unreadable
+then does the error apply.
 For local source edits or a manually linked installation, run
 `omarchy restart shell` after changing plugin code.
 

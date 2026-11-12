@@ -121,6 +121,13 @@ test('the sleep watchdog treats a fire after a sleep as a completed request', ()
   assert.equal(Policy.sleptDuring(-3600000, 60000), false, 'a clock set back is no sleep');
 });
 
+test('only text that is not JSON at all can be a write in progress', () => {
+  for (const text of ['', '{', '{"version": 1, "plugins": [', '{"version":1}x', undefined])
+    assert.equal(Policy.parsesAsJson(text), false, String(text));
+  for (const text of ['{}', 'null', '{"version":2}', '[]'])
+    assert.equal(Policy.parsesAsJson(text), true, text);
+});
+
 test('only effective changes count as a new configuration', () => {
   const a = parse(), b = parse();
   assert.equal(Policy.sameConfiguration(a, b), true);
