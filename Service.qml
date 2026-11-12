@@ -37,7 +37,9 @@ Item {
   property string lastEventAt: ""
   property string processError: ""
   property string stayAwakeError: ""
-  readonly property string lastError: configuration.error || stayAwakeError || processError
+  // The last logind inhibitor check that failed; cleared by the next good one.
+  property string inhibitorError: ""
+  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || processError
   property bool stayAwakeStateKnown: false
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
@@ -147,15 +149,24 @@ Item {
     return true
   }
 
-  function afterInhibitorCheck(text) {
+  function afterInhibitorCheck(exitCode, text, errorText) {
     var source = root.attemptSource
-    var value = Policy.parseBlockInhibited(text)
-    root.blockInhibited = value
+    var check = Policy.readBlockInhibited(exitCode, text, errorText)
+    root.blockInhibited = check.value
+    root.inhibitorError = check.ok ? "" : "Couldn't check logind inhibitors: " + check.error
     if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
     if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
-    if (Policy.blockedByInhibitor(value)) {
+    // Unknown is not "none": an idle inhibitor (systemd-inhibit around a
+    // backup) is only honored here, logind doesn't enforce it for suspend.
+    if (!check.ok) {
+      root.deferredReason = "inhibitor-check-failed"
+      finishAttempt("suspend-deferred", root.inhibitorError)
+      scheduleRetry()
+      return
+    }
+    if (Policy.blockedByInhibitor(check.value)) {
       root.deferredReason = "inhibited"
-      finishAttempt("suspend-deferred", "logind inhibitor: " + value)
+      finishAttempt("suspend-deferred", "logind inhibitor: " + check.value)
       scheduleRetry()
       return
     }
@@ -523,10 +534,25 @@ Item {
   // (systemd-inhibit, GNOME/KDE apps) keep the computer awake.
   Process {
     id: inhibitorProbe
+    property bool exitSeen: false
     command: ["timeout", "--kill-after=1s", "3s", "busctl", "--system", "--json=short", "get-property",
       "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
     stdout: StdioCollector { id: inhibitorOutput; waitForEnd: true }
-    onExited: root.afterInhibitorCheck(inhibitorOutput.text)
+    stderr: StdioCollector { id: inhibitorErrorOutput; waitForEnd: true }
+    onRunningChanged: {
+      if (running) {
+        exitSeen = false
+        return
+      }
+      // Not running without an exit: the check couldn't start (no exited()).
+      if (exitSeen) return
+      exitSeen = true
+      root.afterInhibitorCheck(-1, "", "busctl couldn't start")
+    }
+    onExited: function(exitCode) {
+      inhibitorProbe.exitSeen = true
+      root.afterInhibitorCheck(exitCode, inhibitorOutput.text, inhibitorErrorOutput.text)
+    }
   }
 
   // Lock through the public lock interface (foamy.lock or the stock lock) and

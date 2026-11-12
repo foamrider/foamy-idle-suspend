@@ -164,8 +164,19 @@ test('logind action answers are read per Can* method; failed or malformed calls 
     assert.deepEqual(Policy.parseActionSupport(text), {}, String(text));
 });
 
-test('BlockInhibited is read from busctl output, empty when it does not parse', () => {
-  assert.equal(Policy.parseBlockInhibited('{"type":"s","data":"handle-lid-switch:idle"}'), 'handle-lid-switch:idle');
-  for (const text of ['', '{', 'null', '{}', '{"type":"s","data":""}', undefined])
-    assert.equal(Policy.parseBlockInhibited(text), '', String(text));
+test('BlockInhibited is read from busctl output; a failed or unreadable check is no answer', () => {
+  const ok = value => ({ ok: true, value, error: '' });
+  assert.deepEqual(Policy.readBlockInhibited(0, '{"type":"s","data":"handle-lid-switch:idle"}'), ok('handle-lid-switch:idle'));
+  assert.deepEqual(Policy.readBlockInhibited(0, '{"type":"s","data":""}'), ok(''));
+  for (const text of ['', '{', 'null', '{}', '{"type":"s","data":7}', '{"type":"s","data":["idle"]}', undefined])
+    assert.deepEqual(Policy.readBlockInhibited(0, text), { ok: false, value: '', error: "busctl's reply didn't parse" }, String(text));
+  // A nonzero exit fails even when a reply was printed.
+  const reply = '{"type":"s","data":""}';
+  assert.deepEqual(Policy.readBlockInhibited(1, reply, 'Failed to get property\nsecond line'),
+    { ok: false, value: '', error: 'Failed to get property' });
+  assert.deepEqual(Policy.readBlockInhibited(1, reply, ''), { ok: false, value: '', error: 'busctl exited 1' });
+  assert.deepEqual(Policy.readBlockInhibited(-1, '', "busctl couldn't start"), { ok: false, value: '', error: "busctl couldn't start" });
+  for (const code of [124, 137])
+    assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
+  assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
 });

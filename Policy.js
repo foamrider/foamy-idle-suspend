@@ -117,10 +117,21 @@ function parseActionSupport(text) {
   return answers
 }
 
-// logind's BlockInhibited property as busctl --json=short prints it; empty
-// when the reply doesn't parse (see blockedByInhibitor).
-function parseBlockInhibited(text) {
-  try { return String(JSON.parse(text).data || "") } catch (error) { return "" }
+// The inhibitor probe's result: logind's BlockInhibited property as busctl
+// --json=short prints it ({ ok: true, value: "idle:sleep" }, see
+// blockedByInhibitor), or { ok: false, error } when busctl failed, timed out
+// or printed something else. A failed check is no answer: it never reads as
+// "no inhibitor", which would let the computer sleep through one.
+function readBlockInhibited(exitCode, text, errorText) {
+  if (exitCode === 124 || exitCode === 137) return { ok: false, value: "", error: "no answer within 3 seconds" }
+  if (exitCode !== 0) {
+    var detail = String(errorText || "").trim().split("\n")[0].slice(0, 200)
+    return { ok: false, value: "", error: detail || "busctl exited " + exitCode }
+  }
+  var reply = null
+  try { reply = JSON.parse(text) } catch (error) { reply = null }
+  if (!reply || typeof reply.data !== "string") return { ok: false, value: "", error: "busctl's reply didn't parse" }
+  return { ok: true, value: reply.data, error: "" }
 }
 
 // Answers from logind's Can* methods: "yes", "challenge" (allowed after
@@ -165,6 +176,6 @@ if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
   sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
-  sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, parseBlockInhibited: parseBlockInhibited,
+  sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, readBlockInhibited: readBlockInhibited,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }

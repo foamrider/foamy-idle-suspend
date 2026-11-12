@@ -79,7 +79,11 @@ elif name == 'omarchy':
     if (home / 'bad-state').exists(): print('invalid state')
     else: print(json.dumps({'enabled': (home / '.local/state/omarchy/indicators/stay-awake').exists()}))
 elif name == 'busctl':
-    if 'get-property' in sys.argv: print(json.dumps({'type': 's', 'data': read('block-inhibited', '')}))
+    if 'get-property' in sys.argv:
+        if (home / 'inhibitor-fail').exists():
+            print('Failed to get property BlockInhibited: Connection timed out', file=sys.stderr); sys.exit(1)
+        if (home / 'inhibitor-garbage').exists(): print('garbage')
+        else: print(json.dumps({'type': 's', 'data': read('block-inhibited', '')}))
     else: print(json.dumps({'type': 's', 'data': [read('can-' + sys.argv[-1], 'yes')]}))
 elif name == 'omarchy-shell' and sys.argv[1:3] == ['lock', 'status']:
     pending = home / 'locked-at'
@@ -229,6 +233,19 @@ try:
     wait_for(lambda s: len(sleep_calls()) == count + 1)
     active()
     (base / 'block-inhibited').unlink()
+    # An inhibitor check that fails is no answer, never "no inhibitor": sleep
+    # waits, says why and asks again while idle.
+    (base / 'inhibitor-fail').touch()
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    value = wait_for(lambda s: s['deferredReason'] == 'inhibitor-check-failed' and s['retryScheduled'])
+    assert value['lastError'] == "Couldn't check logind inhibitors: Failed to get property BlockInhibited: Connection timed out", value
+    time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although the inhibitor check failed'
+    (base / 'inhibitor-fail').unlink()
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    value = wait_for(lambda s: s['phase'] == 'idle')
+    assert value['lastError'] == '', value
+    active()
     # Playback or an inhibitor that starts while the lock comes up still defers.
     (base / 'lock-delay').write_text('1.0')
     count = len(sleep_calls())
@@ -247,6 +264,17 @@ try:
     wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['phase'] == 'idle')
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although an inhibitor appeared during locking'
     (base / 'block-inhibited').unlink()
+    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    active()
+    # An unreadable reply to the check after locking defers too.
+    count = len(sleep_calls())
+    ipc('test', 'state', True, True, False)
+    wait_for(lambda s: s['phase'] == 'locking')
+    (base / 'inhibitor-garbage').touch()
+    value = wait_for(lambda s: s['deferredReason'] == 'inhibitor-check-failed' and s['phase'] == 'idle')
+    assert value['lastError'] == "Couldn't check logind inhibitors: busctl's reply didn't parse", value
+    time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although the check after locking failed'
+    (base / 'inhibitor-garbage').unlink()
     wait_for(lambda s: len(sleep_calls()) == count + 1)
     active()
     # Power source changes while an attempt is locking: the new source's single
@@ -275,7 +303,7 @@ try:
     ipc('test', 'playing', False)
     write_config()
     wait_for(lambda s: s['policy']['pauseForMedia'] is True)
-    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep')
+    print('PASS: unrelated config writes keep the countdown, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep')
     # No secure lock, no sleep: notify once and retry while idle.
     (base / 'lock-reply').write_text('missing-pam')
     count = len(sleep_calls())
@@ -398,7 +426,10 @@ try:
     assert value['chassis'] == 'unknown' and not value['isLaptop'] and not value['enabled'], value
     assert value['lastError'] == "hostnamectl chassis couldn't start", value
     print('PASS: a chassis probe that cannot start is reported and keeps a laptops-only policy off')
-    hostenv.check(env, (base / 'runtime.log').read_text())
+    runtime_log = (base / 'runtime.log').read_text()
+    hostenv.check(env, runtime_log)
+    # A script error in a handler would leave an attempt stuck mid-phase.
+    assert not [line for line in runtime_log.splitlines() if 'ReferenceError' in line or 'TypeError' in line], runtime_log
     passed = True
 finally:
     process.terminate()

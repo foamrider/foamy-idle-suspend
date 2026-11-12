@@ -110,7 +110,11 @@ action), `actionFallback` and `actionSupport`. Configurations that set
 When the configured idle timeout expires, the plugin:
 
 1. waits while media is playing (`pauseForMedia`) or while an application holds
-   a logind `idle` or `sleep` block inhibitor (`systemd-inhibit`);
+   a logind `idle` or `sleep` block inhibitor (`systemd-inhibit`). A check
+   that fails or gets no answer counts as no answer, not as "no inhibitor":
+   the plugin waits, reports it in status (`deferredReason`
+   `inhibitor-check-failed`, `lastError`) and checks again while the computer
+   stays idle (after a minute, or the failure backoff below);
 2. locks the screen through the public lock interface (`omarchy-shell lock lock`,
    answered by the stock lock or a replacement such as Foamy Lock) and waits up
    to about ten seconds for `omarchy-shell lock status` to report `secure`
