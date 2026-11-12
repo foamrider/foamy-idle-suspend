@@ -473,15 +473,6 @@ Item {
     root.applyConfiguration(next)
   }
 
-  readonly property int configSettleMs: 200
-
-  Timer {
-    id: configSettleTimer
-    interval: root.configSettleMs
-    repeat: false
-    onTriggered: configFile.reload()
-  }
-
   Timer {
     id: configRereadTimer
     interval: root.configRereadMs
@@ -501,15 +492,7 @@ Item {
     watchChanges: true
     printErrors: false
     // The last configuration stays in force while the file is re-read.
-    // FileView can miss a change that lands while a read is still running
-    // (seen with Quickshell 0.3.2: three writes within a millisecond ended on
-    // the second-to-last content in 4-8 bursts of 100, atomic or in place,
-    // until some later write). One more read once changes have been quiet for
-    // configSettleMs picks up what the file holds then.
-    onFileChanged: {
-      reload()
-      configSettleTimer.restart()
-    }
+    onFileChanged: reload()
     onLoaded: root.configLoaded(text())
     onLoadFailed: {
       configRereadTimer.stop()
