@@ -110,7 +110,11 @@ action), `actionFallback` and `actionSupport`. Configurations that set
 When the configured idle timeout expires, the plugin:
 
 1. waits while media is playing (`pauseForMedia`) or while an application holds
-   a logind `idle` or `sleep` block inhibitor (`systemd-inhibit`);
+   a logind `idle` or `sleep` block inhibitor (`systemd-inhibit`). A check
+   that fails or gets no answer counts as no answer, not as "no inhibitor":
+   the plugin waits, reports it in status (`deferredReason`
+   `inhibitor-check-failed`, `lastError`) and checks again while the computer
+   stays idle (after a minute, or the failure backoff below);
 2. locks the screen through the public lock interface (`omarchy-shell lock lock`,
    answered by the stock lock or a replacement such as Foamy Lock) and waits up
    to about ten seconds for `omarchy-shell lock status` to report `secure`
@@ -121,20 +125,29 @@ When the configured idle timeout expires, the plugin:
 
 If the lock or the sleep request fails (including a `systemctl` that can't
 start, or one still running after a minute awake; time asleep doesn't count),
-a notification says so once, and the plugin tries again while the computer stays idle: after one minute, doubling up
-to fifteen minutes. After a successful request it also checks again a minute
+a notification says so once, and the plugin tries again while the computer stays idle: after two minutes, then
+four and eight, and every fifteen minutes after that. After a successful request it also checks again a minute
 later, so a wake without input (an RTC alarm, a USB device, the lid) does not
 leave the computer awake on battery. Any input stops the retries. Enabling the plugin enables this automatic policy;
 it does not ask for confirmation at each timeout. System authorization rules
-still apply to the sleep request.
+still apply to the sleep request, and it never asks for a password
+(`systemctl --no-ask-password`): a request that needs authentication fails and
+is reported like any other failure, since nobody is there to answer a prompt
+behind the lock.
 
 ### Applying settings
 
 Edits to `shell.json` reload automatically. Missing options use defaults;
 invalid options or unreadable configuration pause automatic sleep and report
 an error. A malformed override never silently enables a different sleep policy.
+Keys on the entry that aren't settings (a typo such as `batterytimeoutSec`
+leaves `batteryTimeoutSec` at its default) don't make it invalid; status lists
+them as `unknownKeys`, and the shell log names them (`config-unknown-keys`).
 Writes that do not change this plugin's settings (bar edits, other plugins) do
-not restart the idle countdown.
+not restart the idle countdown. A file that is momentarily not JSON at all,
+as when a tool rewrites it in place (`jq … > shell.json`), keeps the settings
+in force and is read again after about 250 ms; only if it is still unreadable
+then does the error apply.
 For local source edits or a manually linked installation, run
 `omarchy restart shell` after changing plugin code.
 
@@ -143,7 +156,9 @@ browsers playing video), logind block inhibitors and MPRIS playback pause
 automatic sleep. Apps that only call `org.freedesktop.ScreenSaver.Inhibit` are not
 covered: Omarchy runs no service under that D-Bus name, so those calls reach
 nobody. When the plugin would put this computer to sleep, it also shows a
-notification when Stay awake changes.
+notification when Stay awake changes. While the Stay awake state can't be read
+(`omarchy toggle idle status` fails or takes longer than 5 seconds), automatic
+sleep stays off and status shows why in `lastError`.
 Screensaver and lock timings remain under stock `idle.screensaver` and
 `idle.lock`. Keep Omarchy's idle and lock services enabled; locking before sleep
 remains the responsibility of Omarchy's existing sleep/lock setup.
@@ -154,7 +169,8 @@ remains the responsibility of Omarchy's existing sleep/lock setup.
 omarchy-shell foamy.idle-suspend status
 ```
 
-Status includes the effective policy and sleep action, configuration validity,
+Status includes the effective policy and sleep action, configuration validity
+and `unknownKeys`,
 chassis, power source, Stay awake state, enabled monitors, whether media is
 playing, the current attempt (`phase`, `deferredReason`, `lastLockResult`,
 `failureStreak`, `retryScheduled`) and the latest error. On Omarchy 4.5 the
@@ -175,19 +191,20 @@ are Omarchy, Quickshell with Wayland, UPower and MPRIS, systemd (`systemctl`,
 is required on standard Omarchy.
 
 ```sh
-node --test tests/*.test.cjs
-python3 -I -B tests/runtime.py
-bash tests/kit-check.sh
-qmllint Service.qml
-omarchy plugin validate .
+mise install              # once: the pinned linters and formatters
+tests/validate.sh         # kit-check, plugin validate, linters, formatters, tests/suite.sh
+tests/validate.sh --ci    # what CI runs: no Quickshell, no Omarchy host
+tests/suite.sh            # just the tests: node, runtime.py, the kit's i18n check
 ```
 
+The runtime test and the language check import the harness from a foamy-kit
+checkout (`FOAMY_KIT`, default `~/GitHub/Personal/foamy-kit`).
 The runtime test targets Omarchy 4.5 and loads the installed
 `/usr/share/omarchy/shell/Commons`; set `FOAMY_TEST_COMMONS` to another Omarchy
 `shell/Commons` directory to run it against that tree.
 
 The runtime test uses a temporary home with mocked power, idle events, and
-system commands. It tests real Quickshell configuration watching and process
+system commands (bash stand-ins reached by absolute path). It tests real Quickshell configuration watching and process
 handling, including invalid settings, failed, hung and unstartable sleep
 requests, and status commands that can't start. It requires
 local IPC socket access and never suspends the machine. Actual compositor idle

@@ -13,7 +13,11 @@ Item {
   // Injected by omarchy-shell's service loader.
   property var shell: null
 
-  property var configuration: ({ valid: false, settings: Policy.defaults(), error: "Loading shell.json" })
+  property var configuration: ({
+      valid: false,
+      settings: Policy.defaults(),
+      error: "Loading shell.json"
+    })
   readonly property var policy: configuration.settings
   readonly property var batteryTimeoutSeconds: policy.batteryTimeoutSec
   readonly property var acTimeoutSeconds: policy.acTimeoutSec
@@ -21,6 +25,9 @@ Item {
   readonly property string stayAwakeStateDir: Quickshell.env("HOME") + "/.local/state/omarchy/indicators"
   readonly property bool idleEnabled: stayAwakeStateKnown && !lastStayAwake
   property bool stateRefreshPending: false
+  // Deadline for `omarchy toggle idle status` (it normally answers in tens
+  // of milliseconds); a hung read would otherwise keep sleep off silently.
+  readonly property int stayAwakeTimeoutSec: 5
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -37,7 +44,9 @@ Item {
   property string lastEventAt: ""
   property string processError: ""
   property string stayAwakeError: ""
-  readonly property string lastError: configuration.error || stayAwakeError || processError
+  // The last logind inhibitor check that failed; cleared by the next good one.
+  property string inhibitorError: ""
+  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || processError
   property bool stayAwakeStateKnown: false
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
@@ -55,6 +64,9 @@ Item {
   property int failureStreak: 0
   // Failure notifications are shown once per idle period.
   property var notified: ({})
+  // "Sleep isn't available" describes the machine, not one idle period:
+  // shown once per configuration (see applyConfiguration).
+  property bool unavailableNotified: false
   property string fallbackNotified: ""
   readonly property int retryBaseMs: 60000
   // How long systemctl may take to hand the sleep request to logind; it
@@ -92,15 +104,14 @@ Item {
   }
 
   function notifyOnce(key, title, body, urgency) {
-    if (notified[key]) return
+    if (notified[key])
+      return
     var next = {}
-    for (var name in notified) next[name] = true
+    for (const name in notified)
+      next[name] = true
     next[key] = true
     notified = next
-    Quickshell.execDetached([
-      "notify-send", "-a", "Foamy Idle Suspend", "-u", urgency || "normal",
-      "-h", "string:omarchy-glyph:\u{f04b2}", title, body
-    ])
+    Quickshell.execDetached(["notify-send", "-a", "Foamy Idle Suspend", "-u", urgency || "normal", "-h", "string:omarchy-glyph:\u{f04b2}", title, body])
   }
 
   function requestSuspend(source) {
@@ -111,11 +122,13 @@ Item {
     if (root.phase !== "idle") {
       // A repeat for the same source is redundant; a request for the other
       // source (power changed mid-attempt) runs once this attempt ends.
-      if (source !== root.attemptSource) root.pendingSource = source
+      if (source !== root.attemptSource)
+        root.pendingSource = source
       logEvent("suspend-skipped", "request already running")
       return
     }
-    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
+    if (deferForMedia())
+      return finishAttempt("suspend-deferred", "media playing")
     root.deferredReason = ""
     root.attemptSource = source
     // Ask logind again on every attempt: swap and hibernation can change
@@ -126,37 +139,58 @@ Item {
 
   function afterActionProbe() {
     var source = root.attemptSource
-    if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
+    if (!stillIdle(source))
+      return finishAttempt("suspend-skipped", "activity during checks")
     if (!root.effectiveAction) {
       root.processError = "No sleep action is available on this system"
       finishAttempt("suspend-unavailable", root.policy.suspendAction)
-      notifyOnce("unavailable", FoamyI18n.t("Sleep isn't available"),
-        FoamyI18n.t("This computer reports that it can't suspend, so automatic sleep is off."))
+      if (root.unavailableNotified)
+        return
+      root.unavailableNotified = true
+      notifyOnce("unavailable", FoamyI18n.t("Sleep isn't available"), FoamyI18n.t("This computer reports that it can't suspend, so automatic sleep is off."))
       return
     }
     root.phase = "checking"
-    inhibitorProbe.running = true
+    checkInhibitors()
   }
 
   // Media can start (remote control, a timer) while the asynchronous checks
   // or the lock run, so every step re-checks it. The deferral is retried as
   // soon as playback stops while still idle (onMediaPlayingChanged).
   function deferForMedia() {
-    if (!root.policy.pauseForMedia || !root.mediaPlaying) return false
+    if (!root.policy.pauseForMedia || !root.mediaPlaying)
+      return false
     root.deferredReason = "media-playing"
     return true
   }
 
-  function afterInhibitorCheck(text) {
+  // Reset before the start, like the other probes: a start that fails may
+  // never report running, so exitSeen can't be reset from runningChanged.
+  function checkInhibitors() {
+    inhibitorProbe.exitSeen = false
+    inhibitorProbe.running = true
+  }
+
+  function afterInhibitorCheck(exitCode, text, errorText) {
     var source = root.attemptSource
-    var value = ""
-    try { value = String(JSON.parse(text).data || "") } catch (error) { value = "" }
-    root.blockInhibited = value
-    if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity during checks")
-    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
-    if (Policy.blockedByInhibitor(value)) {
+    var check = Policy.readBlockInhibited(exitCode, text, errorText)
+    root.blockInhibited = check.value
+    root.inhibitorError = check.ok ? "" : "Couldn't check logind inhibitors: " + check.error
+    if (!stillIdle(source))
+      return finishAttempt("suspend-skipped", "activity during checks")
+    if (deferForMedia())
+      return finishAttempt("suspend-deferred", "media playing")
+    // Unknown is not "none": an idle inhibitor (systemd-inhibit around a
+    // backup) is only honored here, logind doesn't enforce it for suspend.
+    if (!check.ok) {
+      root.deferredReason = "inhibitor-check-failed"
+      finishAttempt("suspend-deferred", root.inhibitorError)
+      scheduleRetry()
+      return
+    }
+    if (Policy.blockedByInhibitor(check.value)) {
       root.deferredReason = "inhibited"
-      finishAttempt("suspend-deferred", "logind inhibitor: " + value)
+      finishAttempt("suspend-deferred", "logind inhibitor: " + check.value)
       scheduleRetry()
       return
     }
@@ -166,6 +200,8 @@ Item {
       runSuspend()
     } else if (root.policy.lockBeforeSuspend) {
       root.phase = "locking"
+      // Reset before the start: a start that fails never reports running.
+      lockProcess.exitSeen = false
       lockProcess.running = true
     } else {
       runSuspend()
@@ -176,10 +212,12 @@ Item {
     root.lastLockResult = result
     var source = root.attemptSource
     if (result === "secure") {
-      if (!stillIdle(source)) return finishAttempt("suspend-skipped", "activity while locking")
-      if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
+      if (!stillIdle(source))
+        return finishAttempt("suspend-skipped", "activity while locking")
+      if (deferForMedia())
+        return finishAttempt("suspend-deferred", "media playing")
       root.phase = "rechecking"
-      inhibitorProbe.running = true
+      checkInhibitors()
       return
     }
     // Defense in depth: never sleep with the session exposed. The user is
@@ -187,18 +225,23 @@ Item {
     root.failureStreak += 1
     root.processError = "The screen did not lock (" + result + ")"
     finishAttempt("lock-failed", result)
-    notifyOnce("lock-failed", FoamyI18n.t("Screen didn't lock"),
-      FoamyI18n.t("Automatic sleep was skipped because the screen couldn't be locked. It tries again while the computer stays idle."), "critical")
+    notifyOnce("lock-failed", FoamyI18n.t("Screen didn't lock"), FoamyI18n.t("Automatic sleep was skipped because the screen couldn't be locked. It tries again while the computer stays idle."), "critical")
     scheduleRetry()
   }
 
   function runSuspend() {
     // Last synchronous check before the sleep command.
-    if (!stillIdle(root.attemptSource)) return finishAttempt("suspend-skipped", "activity before sleep")
-    if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
+    if (!stillIdle(root.attemptSource))
+      return finishAttempt("suspend-skipped", "activity before sleep")
+    if (deferForMedia())
+      return finishAttempt("suspend-deferred", "media playing")
     root.phase = "suspending"
     root.processError = ""
-    suspendProcess.command = ["systemctl", root.effectiveAction]
+    // No polkit prompt: logind can answer "challenge" (a sleep inhibitor
+    // taken just now, site rules), and a password dialog behind the lock
+    // would wait for nobody until the watchdog. Without it the request fails
+    // at once and is reported and retried like any other failure.
+    suspendProcess.command = ["systemctl", "--no-ask-password", root.effectiveAction]
     logEvent("suspend-request", root.attemptSource + " " + root.effectiveAction)
     root.suspendAttempts += 1
     suspendProcess.attempt = root.suspendAttempts
@@ -212,7 +255,8 @@ Item {
   // (runningChanged after exited, the exit of a request the watchdog
   // stopped) find nothing pending.
   function settleSuspend(attempt, exitCode, errorText) {
-    if (!root.suspendPending || attempt !== root.suspendAttempts) return
+    if (!root.suspendPending || attempt !== root.suspendAttempts)
+      return
     root.suspendPending = false
     suspendWatchdog.stop()
     afterSuspend(exitCode, errorText)
@@ -223,8 +267,7 @@ Item {
       root.failureStreak += 1
       root.processError = String(errorText || "systemctl " + root.effectiveAction + " failed").trim()
       finishAttempt("suspend-error", root.processError)
-      notifyOnce("suspend-failed", FoamyI18n.t("Automatic sleep failed"),
-        FoamyI18n.t("%1. It tries again while the computer stays idle.", root.processError.replace(/[.\s]+$/, "")))
+      notifyOnce("suspend-failed", FoamyI18n.t("Automatic sleep failed"), FoamyI18n.t("%1. It tries again while the computer stays idle.", root.processError.replace(/[.\s]+$/, "")))
       // The action may have stopped being available (swap removed, …).
       probeActions()
     } else {
@@ -241,14 +284,16 @@ Item {
     logEvent(event, details)
     var pending = root.pendingSource
     root.pendingSource = ""
-    if (pending && pending === currentSource()) Qt.callLater(resumeIfIdle)
+    if (pending && pending === currentSource())
+      Qt.callLater(resumeIfIdle)
   }
 
   // Start an attempt for the current power source if it is idle and nothing
   // is running; requestSuspend re-checks everything else.
   function resumeIfIdle() {
     var source = currentSource()
-    if (root.phase === "idle" && monitorFor(source).isIdle) requestSuspend(source)
+    if (root.phase === "idle" && monitorFor(source).isIdle)
+      requestSuspend(source)
   }
 
   function scheduleRetry() {
@@ -257,7 +302,8 @@ Item {
   }
 
   function activityResumed() {
-    if (batteryMonitor.isIdle || acMonitor.isIdle) return
+    if (batteryMonitor.isIdle || acMonitor.isIdle)
+      return
     retryTimer.stop()
     root.failureStreak = 0
     root.deferredReason = ""
@@ -265,42 +311,40 @@ Item {
   }
 
   function probeActions() {
-    if (!actionProbe.running) actionProbe.running = true
+    if (actionProbe.running)
+      return
+    // Reset before the start: a start that fails never reports running.
+    actionProbe.exitSeen = false
+    actionProbe.running = true
+  }
+
+  // The probe's one way to end: its exit, or a start that failed.
+  function afterActionProbeRun(text) {
+    root.applyActionProbe(text)
+    if (root.phase === "probing")
+      root.afterActionProbe()
   }
 
   function applyActionProbe(text) {
-    var answers = {}
-    var lines = String(text || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var space = lines[i].indexOf(" ")
-      if (space < 0) continue
-      var method = lines[i].slice(0, space)
-      var answer = ""
-      try { answer = String(JSON.parse(lines[i].slice(space + 1)).data[0] || "") } catch (error) { answer = "" }
-      for (var a = 0; a < Policy.ACTIONS.length; a++) {
-        if (Policy.CAN_METHODS[Policy.ACTIONS[a]] === method && answer) answers[Policy.ACTIONS[a]] = answer
-      }
-    }
-    root.actionSupport = answers
-    logEvent("actions", JSON.stringify(answers))
+    root.actionSupport = Policy.parseActionSupport(text)
+    logEvent("actions", JSON.stringify(root.actionSupport))
   }
 
   onActionChoiceChanged: {
-    if (!actionChoice.fallback || !sleepActive || fallbackNotified === policy.suspendAction) return
+    if (!actionChoice.fallback || !sleepActive || fallbackNotified === policy.suspendAction)
+      return
     fallbackNotified = policy.suspendAction
     logEvent("action-fallback", policy.suspendAction + " unavailable, using suspend")
-    Quickshell.execDetached([
-      "notify-send", "-a", "Foamy Idle Suspend", "-u", "normal", "-h", "string:omarchy-glyph:\u{f04b2}",
-      FoamyI18n.t("%1 isn't available", policy.suspendAction),
-      FoamyI18n.t("Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto.")
-    ])
+    Quickshell.execDetached(["notify-send", "-a", "Foamy Idle Suspend", "-u", "normal", "-h", "string:omarchy-glyph:\u{f04b2}", FoamyI18n.t("%1 isn't available", policy.suspendAction), FoamyI18n.t("Automatic sleep uses suspend instead. Set up hibernation, or set suspendAction to auto.")])
   }
 
   onMediaPlayingChanged: {
-    if (mediaPlaying || deferredReason !== "media-playing" || phase !== "idle") return
+    if (mediaPlaying || deferredReason !== "media-playing" || phase !== "idle")
+      return
     deferredReason = ""
     var source = currentSource()
-    if (monitorFor(source).isIdle) requestSuspend(source)
+    if (monitorFor(source).isIdle)
+      requestSuspend(source)
   }
 
   function syncStayAwakeNotification(stayAwake) {
@@ -311,20 +355,13 @@ Item {
       root.stayAwakeObserved = true
       return
     }
-    if (root.lastStayAwake === stayAwake) return
-
+    if (root.lastStayAwake === stayAwake)
+      return
     root.lastStayAwake = stayAwake
     // Only where this plugin would put the computer to sleep.
-    if (!root.sleepActive) return
-    Quickshell.execDetached([
-      "notify-send", "-a", "omarchy-action", "-u", "low",
-      "-h", "boolean:transient:true",
-      "-h", "string:omarchy-glyph:" + (stayAwake ? "\u{f0176}" : "\u{f0faa}"),
-      stayAwake ? FoamyI18n.t("Stay awake enabled") : FoamyI18n.t("Stay awake disabled"),
-      stayAwake
-        ? FoamyI18n.t("Automatic sleep is paused")
-        : FoamyI18n.t("Automatic sleep is back on")
-    ])
+    if (!root.sleepActive)
+      return
+    Quickshell.execDetached(["notify-send", "-a", "omarchy-action", "-u", "low", "-h", "boolean:transient:true", "-h", "string:omarchy-glyph:" + (stayAwake ? "\u{f0176}" : "\u{f0faa}"), stayAwake ? FoamyI18n.t("Stay awake enabled") : FoamyI18n.t("Stay awake disabled"), stayAwake ? FoamyI18n.t("Automatic sleep is paused") : FoamyI18n.t("Automatic sleep is back on")])
   }
 
   function statusJson() {
@@ -332,6 +369,8 @@ Item {
       enabled: batteryMonitor.enabled || acMonitor.enabled,
       configPath: root.configPath,
       configValid: root.configuration.valid,
+      // Entry keys that aren't settings (a typo keeps that setting's default).
+      unknownKeys: root.configuration.unknownKeys || [],
       policy: root.policy,
       effectiveAction: root.effectiveAction,
       // What "auto" resolved to at the last probe (null for explicit actions).
@@ -388,21 +427,60 @@ Item {
     repeat: false
     onTriggered: {
       var source = root.currentSource()
-      if (root.monitorFor(source).isIdle) root.requestSuspend(source)
+      if (root.monitorFor(source).isIdle)
+        root.requestSuspend(source)
     }
   }
 
   function applyConfiguration(next) {
     // Keep the current object when nothing effective changed, so the idle
     // monitors keep counting through unrelated shell.json writes.
-    if (Policy.sameConfiguration(root.configuration, next)) return
+    if (Policy.sameConfiguration(root.configuration, next))
+      return
     var actionChanged = next.settings.suspendAction !== root.policy.suspendAction
     root.configuration = next
+    root.unavailableNotified = false
     root.logEvent(next.valid ? "config-ready" : "config-error", next.error)
-    if (actionChanged) probeActions()
+    if (next.unknownKeys && next.unknownKeys.length)
+      root.logEvent("config-unknown-keys", next.unknownKeys.join(", "))
+    if (actionChanged)
+      probeActions()
     // A deferred attempt has no idle transition left to wake it; re-evaluate
     // it under the new settings (for example pauseForMedia turned off).
-    if (root.deferredReason !== "") Qt.callLater(resumeIfIdle)
+    if (root.deferredReason !== "")
+      Qt.callLater(resumeIfIdle)
+  }
+
+  // A tool that rewrites shell.json in place (truncate, then write, as with
+  // `jq … > shell.json`) can be read half-done; the shell itself writes
+  // atomically. Text that isn't JSON at all keeps the configuration in force
+  // and is read once more after configRereadMs; only an unreadable re-read
+  // applies the error. A complete but invalid entry applies at once.
+  readonly property int configRereadMs: 250
+  property bool configReread: false
+
+  function configLoaded(text) {
+    var next = Policy.parseConfig(text)
+    if (!next.valid && !Policy.parsesAsJson(text) && !root.configReread) {
+      if (!configRereadTimer.running) {
+        root.logEvent("config-partial", "reading shell.json again in " + root.configRereadMs + " ms")
+        configRereadTimer.restart()
+      }
+      return
+    }
+    configRereadTimer.stop()
+    root.configReread = false
+    root.applyConfiguration(next)
+  }
+
+  Timer {
+    id: configRereadTimer
+    interval: root.configRereadMs
+    repeat: false
+    onTriggered: {
+      root.configReread = true
+      configFile.reload()
+    }
   }
 
   // The scoped service API can write this plugin's plugins[] entry
@@ -415,8 +493,17 @@ Item {
     printErrors: false
     // The last configuration stays in force while the file is re-read.
     onFileChanged: reload()
-    onLoaded: root.applyConfiguration(Policy.parseConfig(text()))
-    onLoadFailed: root.applyConfiguration({ valid: false, settings: Policy.defaults(), error: "Cannot read " + root.configPath })
+    onLoaded: root.configLoaded(text())
+    onLoadFailed: {
+      configRereadTimer.stop()
+      root.configReread = false
+      root.applyConfiguration({
+        valid: false,
+        settings: Policy.defaults(),
+        error: "Cannot read " + root.configPath,
+        unknownKeys: []
+      })
+    }
   }
 
   // Use Omarchy's persisted state rather than a restricted cross-plugin API.
@@ -450,31 +537,46 @@ Item {
   Process {
     id: stayAwakeProbe
     property bool exitSeen: false
-    command: ["omarchy", "toggle", "idle", "status"]
-    stdout: StdioCollector { id: awakeOutput; waitForEnd: true }
-    onExited: function(exitCode) {
+    command: ["timeout", "--kill-after=1s", root.stayAwakeTimeoutSec + "s", "omarchy", "toggle", "idle", "status"]
+    stdout: StdioCollector {
+      id: awakeOutput
+      waitForEnd: true
+    }
+    onExited: function (exitCode) {
       stayAwakeProbe.exitSeen = true
-      try {
-        if (exitCode !== 0) throw new Error("idle status exited " + exitCode)
-        var state = JSON.parse(awakeOutput.text)
-        if (typeof state.enabled !== "boolean") throw new Error("idle status missing enabled")
-        root.syncStayAwakeNotification(state.enabled)
-        root.stayAwakeError = ""
-        root.stayAwakeStateKnown = true
-      } catch (error) {
-        root.stayAwakeFailed(String(error))
+      // timeout's own codes: 124/137 the deadline, 126/127 omarchy couldn't run.
+      if (exitCode === 124 || exitCode === 137) {
+        root.stayAwakeFailed("omarchy toggle idle status didn't finish within " + root.stayAwakeTimeoutSec + " seconds")
+      } else if (exitCode === 126 || exitCode === 127) {
+        root.stayAwakeFailed("omarchy toggle idle status couldn't start")
+      } else {
+        try {
+          if (exitCode !== 0)
+            throw new Error("idle status exited " + exitCode)
+          const state = JSON.parse(awakeOutput.text)
+          if (typeof state.enabled !== "boolean")
+            throw new Error("idle status missing enabled")
+          root.syncStayAwakeNotification(state.enabled)
+          root.stayAwakeError = ""
+          root.stayAwakeStateKnown = true
+        } catch (error) {
+          root.stayAwakeFailed(String(error))
+        }
       }
       stayAwakeWatcher.reload()
       // A change while the read was running needs another read of current state.
-      if (root.stateRefreshPending) root.refreshStayAwakeState()
+      if (root.stateRefreshPending)
+        root.refreshStayAwakeState()
     }
-    // Not running without an exit: `omarchy` couldn't start (no exited()).
+    // Not running without an exit: `timeout` couldn't start (no exited()).
     onRunningChanged: {
-      if (running || exitSeen) return
+      if (running || exitSeen)
+        return
       exitSeen = true
       root.stayAwakeFailed("omarchy toggle idle status couldn't start")
       stayAwakeWatcher.reload()
-      if (root.stateRefreshPending) root.refreshStayAwakeState()
+      if (root.stateRefreshPending)
+        root.refreshStayAwakeState()
     }
   }
 
@@ -502,14 +604,15 @@ Item {
       id: chassisError
       waitForEnd: true
     }
-    onExited: function(exitCode, exitStatus) {
+    onExited: function (exitCode, exitStatus) {
       chassisProbe.exitSeen = true
       root.chassisRead(exitCode, chassisOutput.text, chassisError.text)
     }
     // Not running without an exit: hostnamectl couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
     onRunningChanged: {
-      if (running || exitSeen) return
+      if (running || exitSeen)
+        return
       exitSeen = true
       root.chassisRead(-1, "", "hostnamectl chassis couldn't start")
     }
@@ -519,12 +622,26 @@ Item {
   // Omarchy only does on request, so suspend-then-hibernate is often "na".
   Process {
     id: actionProbe
-    command: ["timeout", "--kill-after=1s", "5s", "bash", "-c",
-      'for m in CanSuspend CanHibernate CanHybridSleep CanSuspendThenHibernate; do printf "%s " "$m"; busctl --system --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$m" 2>/dev/null || echo "{}"; done']
-    stdout: StdioCollector { id: actionOutput; waitForEnd: true }
+    property bool exitSeen: false
+    command: ["timeout", "--kill-after=1s", "5s", "bash", "-c", 'for m in CanSuspend CanHibernate CanHybridSleep CanSuspendThenHibernate; do printf "%s " "$m"; busctl --system --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$m" 2>/dev/null || echo "{}"; done']
+    stdout: StdioCollector {
+      id: actionOutput
+      waitForEnd: true
+    }
     onExited: {
-      root.applyActionProbe(actionOutput.text)
-      if (root.phase === "probing") root.afterActionProbe()
+      actionProbe.exitSeen = true
+      root.afterActionProbeRun(actionOutput.text)
+    }
+    // Not running without an exit: the probe couldn't start (no exited()).
+    // No answer for any action, like a failed busctl call inside the probe:
+    // the attempt goes on and systemctl decides, instead of waiting at
+    // "probing" for good.
+    onRunningChanged: {
+      if (running || exitSeen)
+        return
+      exitSeen = true
+      root.logEvent("actions-error", "the action probe couldn't start")
+      root.afterActionProbeRun("")
     }
   }
 
@@ -532,10 +649,27 @@ Item {
   // (systemd-inhibit, GNOME/KDE apps) keep the computer awake.
   Process {
     id: inhibitorProbe
-    command: ["timeout", "--kill-after=1s", "3s", "busctl", "--system", "--json=short", "get-property",
-      "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
-    stdout: StdioCollector { id: inhibitorOutput; waitForEnd: true }
-    onExited: root.afterInhibitorCheck(inhibitorOutput.text)
+    property bool exitSeen: false
+    command: ["timeout", "--kill-after=1s", "3s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
+    stdout: StdioCollector {
+      id: inhibitorOutput
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: inhibitorErrorOutput
+      waitForEnd: true
+    }
+    // Not running without an exit: the check couldn't start (no exited()).
+    onRunningChanged: {
+      if (running || exitSeen)
+        return
+      exitSeen = true
+      root.afterInhibitorCheck(-1, "", "busctl couldn't start")
+    }
+    onExited: function (exitCode) {
+      inhibitorProbe.exitSeen = true
+      root.afterInhibitorCheck(exitCode, inhibitorOutput.text, inhibitorErrorOutput.text)
+    }
   }
 
   // Lock through the public lock interface (foamy.lock or the stock lock) and
@@ -544,17 +678,24 @@ Item {
   // or timeout.
   Process {
     id: lockProcess
-    command: ["timeout", "--kill-after=1s", "12s", "bash", "-c",
-      'request() { case $(timeout --kill-after=0.2s 2s omarchy-shell lock lock 2>/dev/null) in missing-pam) echo missing-pam; exit 3;; esac; }; '
-      + 'request; '
-      + 'for _ in $(seq 1 40); do '
-      + 'state=$(timeout --kill-after=0.2s 1s omarchy-shell lock status 2>/dev/null | jq -r \'if .secure == true then "secure" elif .requested == true then "locking" else "idle" end\' 2>/dev/null); '
-      + 'case $state in secure) echo secure; exit 0;; locking) ;; *) request;; esac; '
-      + 'sleep 0.2; done; echo timeout; exit 4']
-    stdout: StdioCollector { id: lockOutput; waitForEnd: true }
-    onExited: function(exitCode) {
+    property bool exitSeen: false
+    command: ["timeout", "--kill-after=1s", "12s", "bash", "-c", 'request() { case $(timeout --kill-after=0.2s 2s omarchy-shell lock lock 2>/dev/null) in missing-pam) echo missing-pam; exit 3;; esac; }; ' + 'request; ' + 'for _ in $(seq 1 40); do ' + 'state=$(timeout --kill-after=0.2s 1s omarchy-shell lock status 2>/dev/null | jq -r \'if .secure == true then "secure" elif .requested == true then "locking" else "idle" end\' 2>/dev/null); ' + 'case $state in secure) echo secure; exit 0;; locking) ;; *) request;; esac; ' + 'sleep 0.2; done; echo timeout; exit 4']
+    stdout: StdioCollector {
+      id: lockOutput
+      waitForEnd: true
+    }
+    onExited: function (exitCode) {
+      lockProcess.exitSeen = true
       var result = String(lockOutput.text || "").trim().split("\n").pop()
       root.afterLock(exitCode === 0 && result === "secure" ? "secure" : (result || "timeout"))
+    }
+    // Not running without an exit: the lock couldn't start (no exited()).
+    // That is no secure lock, so no sleep, instead of waiting at "locking".
+    onRunningChanged: {
+      if (running || exitSeen)
+        return
+      exitSeen = true
+      root.afterLock("start-failed")
     }
   }
 
@@ -565,7 +706,7 @@ Item {
       id: suspendError
       waitForEnd: true
     }
-    onExited: function(exitCode, exitStatus) {
+    onExited: function (exitCode, exitStatus) {
       root.settleSuspend(suspendProcess.attempt, exitCode, suspendError.text)
     }
     // After exited() this finds nothing pending. Without exited() before it
@@ -587,16 +728,17 @@ Item {
     interval: root.suspendWatchdogMs
     repeat: false
     onTriggered: {
-      if (!root.suspendPending) return
+      if (!root.suspendPending)
+        return
       var attempt = root.suspendAttempts
       // systemctl is the direct child: SIGKILL ends it (its exit is ignored).
-      if (suspendProcess.running) suspendProcess.signal(9)
+      if (suspendProcess.running)
+        suspendProcess.signal(9)
       if (Policy.sleptDuring(Date.now() - root.suspendStartedAt, root.suspendWatchdogMs)) {
         root.logEvent("suspend-watchdog", "systemctl " + root.effectiveAction + " was still running after a sleep")
         root.settleSuspend(attempt, 0, "")
       } else {
-        root.settleSuspend(attempt, -1, "systemctl " + root.effectiveAction + " didn't finish within "
-          + Math.round(root.suspendWatchdogMs / 1000) + " seconds")
+        root.settleSuspend(attempt, -1, "systemctl " + root.effectiveAction + " didn't finish within " + Math.round(root.suspendWatchdogMs / 1000) + " seconds")
       }
     }
   }

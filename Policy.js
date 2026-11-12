@@ -24,7 +24,18 @@ var CAN_METHODS = {
   "suspend-then-hibernate": "CanSuspendThenHibernate"
 }
 
+// Keys on this plugin's entry that are neither a setting nor "id", sorted.
+// They are reported, not rejected: a typo (batterytimeoutSec) leaves the
+// setting at its default, which would otherwise go unnoticed.
+function unknownKeys(entry) {
+  var known = defaults()
+  return Object.keys(entry).filter(function(key) {
+    return key !== "id" && !Object.prototype.hasOwnProperty.call(known, key)
+  }).sort()
+}
+
 function parseConfig(text) {
+  var unknown = []
   try {
     var config = JSON.parse(text)
     if (!config || config.version !== 1 || !Array.isArray(config.plugins))
@@ -35,6 +46,7 @@ function parseConfig(text) {
     if (entries.length !== 1)
       throw new Error("Keep exactly one foamy.idle-suspend entry in plugins")
     var entry = entries[0]
+    unknown = unknownKeys(entry)
     var policy = defaults()
     for (var key in policy) {
       if (entry[key] !== undefined) policy[key] = entry[key]
@@ -56,11 +68,17 @@ function parseConfig(text) {
       throw new Error("lockBeforeSuspend must be true or false")
     if (CHOICES.indexOf(policy.suspendAction) === -1)
       throw new Error("suspendAction must be auto, suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
-    return { valid: true, settings: policy, error: "" }
+    return { valid: true, settings: policy, error: "", unknownKeys: unknown }
   } catch (error) {
     // Never apply a fallback sleep policy after a malformed user override.
-    return { valid: false, settings: defaults(), error: String(error.message || error) }
+    return { valid: false, settings: defaults(), error: String(error.message || error), unknownKeys: unknown }
   }
+}
+
+// Whether text is JSON at all. shell.json text that isn't may be a write
+// still in progress (truncated, then rewritten in place), see Service.qml.
+function parsesAsJson(text) {
+  try { JSON.parse(text); return true } catch (error) { return false }
 }
 
 // Same effective configuration: a write to shell.json that changes nothing
@@ -68,6 +86,7 @@ function parseConfig(text) {
 function sameConfiguration(a, b) {
   if (!a || !b) return false
   return a.valid === b.valid && a.error === b.error && JSON.stringify(a.settings) === JSON.stringify(b.settings)
+    && JSON.stringify(a.unknownKeys || []) === JSON.stringify(b.unknownKeys || [])
 }
 
 function allowed(policy, configValid, chassisLoaded, isLaptop, idleEnabled) {
@@ -95,6 +114,43 @@ function mediaPlaying(players) {
 function blockedByInhibitor(blockInhibited) {
   var what = String(blockInhibited || "").split(":")
   return what.indexOf("idle") !== -1 || what.indexOf("sleep") !== -1
+}
+
+// The action probe's output: one "<CanMethod> <busctl --json=short reply>"
+// line per method, "{}" when the call failed. Returns the answer per action
+// (see usable); lines that don't parse or name another method are skipped,
+// so a failed call leaves its action unknown.
+function parseActionSupport(text) {
+  var answers = {}
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var space = lines[i].indexOf(" ")
+    if (space < 0) continue
+    var method = lines[i].slice(0, space)
+    var answer = ""
+    try { answer = String(JSON.parse(lines[i].slice(space + 1)).data[0] || "") } catch (error) { answer = "" }
+    for (var a = 0; a < ACTIONS.length; a++) {
+      if (CAN_METHODS[ACTIONS[a]] === method && answer) answers[ACTIONS[a]] = answer
+    }
+  }
+  return answers
+}
+
+// The inhibitor probe's result: logind's BlockInhibited property as busctl
+// --json=short prints it ({ ok: true, value: "idle:sleep" }, see
+// blockedByInhibitor), or { ok: false, error } when busctl failed, timed out
+// or printed something else. A failed check is no answer: it never reads as
+// "no inhibitor", which would let the computer sleep through one.
+function readBlockInhibited(exitCode, text, errorText) {
+  if (exitCode === 124 || exitCode === 137) return { ok: false, value: "", error: "no answer within 3 seconds" }
+  if (exitCode !== 0) {
+    var detail = String(errorText || "").trim().split("\n")[0].slice(0, 200)
+    return { ok: false, value: "", error: detail || "busctl exited " + exitCode }
+  }
+  var reply = null
+  try { reply = JSON.parse(text) } catch (error) { reply = null }
+  if (!reply || typeof reply.data !== "string") return { ok: false, value: "", error: "busctl's reply didn't parse" }
+  return { ok: true, value: reply.data, error: "" }
 }
 
 // Answers from logind's Can* methods: "yes", "challenge" (allowed after
@@ -137,8 +193,8 @@ function sleptDuring(wallElapsedMs, budgetMs) {
 
 if (typeof module !== "undefined") module.exports = {
   defaults: defaults, parseConfig: parseConfig, allowed: allowed, active: active,
-  sameConfiguration: sameConfiguration, mediaPlaying: mediaPlaying,
+  sameConfiguration: sameConfiguration, parsesAsJson: parsesAsJson, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
-  sleptDuring: sleptDuring,
+  sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, readBlockInhibited: readBlockInhibited,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }

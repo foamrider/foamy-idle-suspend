@@ -10,7 +10,23 @@ test('omitted options give a battery-only laptop policy that works without hiber
   assert.deepEqual(parse(), { valid: true, settings: {
     batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'auto',
     pauseForMedia: true, lockBeforeSuspend: true
-  }, error: '' });
+  }, error: '', unknownKeys: [] });
+});
+
+test('unknown keys are listed without changing validity', () => {
+  // A typo leaves the default in force, so it has to be visible.
+  const typo = parse({ batterytimeoutSec: null, zeta: 1, alpha: true });
+  assert.equal(typo.valid, true);
+  assert.equal(typo.settings.batteryTimeoutSec, 900);
+  assert.deepEqual(typo.unknownKeys, ['alpha', 'batterytimeoutSec', 'zeta']);
+  // Listed for an invalid entry too; "id" is never unknown.
+  const invalid = parse({ acTimeoutSec: 0, acTimeout: 60 });
+  assert.equal(invalid.valid, false);
+  assert.deepEqual(invalid.unknownKeys, ['acTimeout']);
+  assert.deepEqual(Policy.parseConfig('{').unknownKeys, []);
+  // A new or removed unknown key is a change worth reporting.
+  assert.equal(Policy.sameConfiguration(parse(), typo), false);
+  assert.equal(Policy.sameConfiguration(typo, parse({ zeta: 2, alpha: false, batterytimeoutSec: 1 })), true);
 });
 
 test('independent power timeouts and supported sleep actions are configurable', () => {
@@ -105,6 +121,13 @@ test('the sleep watchdog treats a fire after a sleep as a completed request', ()
   assert.equal(Policy.sleptDuring(-3600000, 60000), false, 'a clock set back is no sleep');
 });
 
+test('only text that is not JSON at all can be a write in progress', () => {
+  for (const text of ['', '{', '{"version": 1, "plugins": [', '{"version":1}x', undefined])
+    assert.equal(Policy.parsesAsJson(text), false, String(text));
+  for (const text of ['{}', 'null', '{"version":2}', '[]'])
+    assert.equal(Policy.parsesAsJson(text), true, text);
+});
+
 test('only effective changes count as a new configuration', () => {
   const a = parse(), b = parse();
   assert.equal(Policy.sameConfiguration(a, b), true);
@@ -149,4 +172,34 @@ test('auto uses suspend-then-hibernate only where logind says yes, else suspend'
   assert.deepEqual(Policy.chooseAction('suspend-then-hibernate', yes), { action: 'suspend-then-hibernate', fallback: false });
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'na', suspend: 'yes' }), { action: 'suspend', fallback: true });
   assert.deepEqual(Policy.CHOICES, ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']);
+});
+
+test('logind action answers are read per Can* method; failed or malformed calls stay unknown', () => {
+  const reply = answer => JSON.stringify({ type: 's', data: [answer] });
+  assert.deepEqual(Policy.parseActionSupport([
+    'CanSuspend ' + reply('yes'), 'CanHibernate ' + reply('na'),
+    'CanHybridSleep ' + reply('challenge'), 'CanSuspendThenHibernate ' + reply('no'), ''
+  ].join('\n')), { suspend: 'yes', hibernate: 'na', 'hybrid-sleep': 'challenge', 'suspend-then-hibernate': 'no' });
+  // The probe prints "{}" for a call that failed; that action is left to systemctl.
+  assert.deepEqual(Policy.parseActionSupport('CanSuspend {}\nCanHibernate ' + reply('na')), { hibernate: 'na' });
+  for (const text of ['', null, undefined, 'CanSuspend', 'CanSuspend {', 'CanSuspend null', 'CanSuspend ' + reply(''),
+    'CanReboot ' + reply('yes'), 'canSuspend ' + reply('yes')])
+    assert.deepEqual(Policy.parseActionSupport(text), {}, String(text));
+});
+
+test('BlockInhibited is read from busctl output; a failed or unreadable check is no answer', () => {
+  const ok = value => ({ ok: true, value, error: '' });
+  assert.deepEqual(Policy.readBlockInhibited(0, '{"type":"s","data":"handle-lid-switch:idle"}'), ok('handle-lid-switch:idle'));
+  assert.deepEqual(Policy.readBlockInhibited(0, '{"type":"s","data":""}'), ok(''));
+  for (const text of ['', '{', 'null', '{}', '{"type":"s","data":7}', '{"type":"s","data":["idle"]}', undefined])
+    assert.deepEqual(Policy.readBlockInhibited(0, text), { ok: false, value: '', error: "busctl's reply didn't parse" }, String(text));
+  // A nonzero exit fails even when a reply was printed.
+  const reply = '{"type":"s","data":""}';
+  assert.deepEqual(Policy.readBlockInhibited(1, reply, 'Failed to get property\nsecond line'),
+    { ok: false, value: '', error: 'Failed to get property' });
+  assert.deepEqual(Policy.readBlockInhibited(1, reply, ''), { ok: false, value: '', error: 'busctl exited 1' });
+  assert.deepEqual(Policy.readBlockInhibited(-1, '', "busctl couldn't start"), { ok: false, value: '', error: "busctl couldn't start" });
+  for (const code of [124, 137])
+    assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
+  assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
 });
