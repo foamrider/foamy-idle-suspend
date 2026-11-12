@@ -10,7 +10,23 @@ test('omitted options give a battery-only laptop policy that works without hiber
   assert.deepEqual(parse(), { valid: true, settings: {
     batteryTimeoutSec: 900, acTimeoutSec: null, laptopsOnly: true, suspendAction: 'auto',
     pauseForMedia: true, lockBeforeSuspend: true
-  }, error: '' });
+  }, error: '', unknownKeys: [] });
+});
+
+test('unknown keys are listed without changing validity', () => {
+  // A typo leaves the default in force, so it has to be visible.
+  const typo = parse({ batterytimeoutSec: null, zeta: 1, alpha: true });
+  assert.equal(typo.valid, true);
+  assert.equal(typo.settings.batteryTimeoutSec, 900);
+  assert.deepEqual(typo.unknownKeys, ['alpha', 'batterytimeoutSec', 'zeta']);
+  // Listed for an invalid entry too; "id" is never unknown.
+  const invalid = parse({ acTimeoutSec: 0, acTimeout: 60 });
+  assert.equal(invalid.valid, false);
+  assert.deepEqual(invalid.unknownKeys, ['acTimeout']);
+  assert.deepEqual(Policy.parseConfig('{').unknownKeys, []);
+  // A new or removed unknown key is a change worth reporting.
+  assert.equal(Policy.sameConfiguration(parse(), typo), false);
+  assert.equal(Policy.sameConfiguration(typo, parse({ zeta: 2, alpha: false, batterytimeoutSec: 1 })), true);
 });
 
 test('independent power timeouts and supported sleep actions are configurable', () => {

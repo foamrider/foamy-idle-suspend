@@ -24,7 +24,18 @@ var CAN_METHODS = {
   "suspend-then-hibernate": "CanSuspendThenHibernate"
 }
 
+// Keys on this plugin's entry that are neither a setting nor "id", sorted.
+// They are reported, not rejected: a typo (batterytimeoutSec) leaves the
+// setting at its default, which would otherwise go unnoticed.
+function unknownKeys(entry) {
+  var known = defaults()
+  return Object.keys(entry).filter(function(key) {
+    return key !== "id" && !Object.prototype.hasOwnProperty.call(known, key)
+  }).sort()
+}
+
 function parseConfig(text) {
+  var unknown = []
   try {
     var config = JSON.parse(text)
     if (!config || config.version !== 1 || !Array.isArray(config.plugins))
@@ -35,6 +46,7 @@ function parseConfig(text) {
     if (entries.length !== 1)
       throw new Error("Keep exactly one foamy.idle-suspend entry in plugins")
     var entry = entries[0]
+    unknown = unknownKeys(entry)
     var policy = defaults()
     for (var key in policy) {
       if (entry[key] !== undefined) policy[key] = entry[key]
@@ -56,10 +68,10 @@ function parseConfig(text) {
       throw new Error("lockBeforeSuspend must be true or false")
     if (CHOICES.indexOf(policy.suspendAction) === -1)
       throw new Error("suspendAction must be auto, suspend, hibernate, hybrid-sleep, or suspend-then-hibernate")
-    return { valid: true, settings: policy, error: "" }
+    return { valid: true, settings: policy, error: "", unknownKeys: unknown }
   } catch (error) {
     // Never apply a fallback sleep policy after a malformed user override.
-    return { valid: false, settings: defaults(), error: String(error.message || error) }
+    return { valid: false, settings: defaults(), error: String(error.message || error), unknownKeys: unknown }
   }
 }
 
@@ -68,6 +80,7 @@ function parseConfig(text) {
 function sameConfiguration(a, b) {
   if (!a || !b) return false
   return a.valid === b.valid && a.error === b.error && JSON.stringify(a.settings) === JSON.stringify(b.settings)
+    && JSON.stringify(a.unknownKeys || []) === JSON.stringify(b.unknownKeys || [])
 }
 
 function allowed(policy, configValid, chassisLoaded, isLaptop, idleEnabled) {

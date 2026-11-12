@@ -342,6 +342,8 @@ Item {
       enabled: batteryMonitor.enabled || acMonitor.enabled,
       configPath: root.configPath,
       configValid: root.configuration.valid,
+      // Entry keys that aren't settings (a typo keeps that setting's default).
+      unknownKeys: root.configuration.unknownKeys || [],
       policy: root.policy,
       effectiveAction: root.effectiveAction,
       // What "auto" resolved to at the last probe (null for explicit actions).
@@ -410,6 +412,7 @@ Item {
     root.configuration = next
     root.unavailableNotified = false
     root.logEvent(next.valid ? "config-ready" : "config-error", next.error)
+    if (next.unknownKeys && next.unknownKeys.length) root.logEvent("config-unknown-keys", next.unknownKeys.join(", "))
     if (actionChanged) probeActions()
     // A deferred attempt has no idle transition left to wake it; re-evaluate
     // it under the new settings (for example pauseForMedia turned off).

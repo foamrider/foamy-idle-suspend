@@ -140,6 +140,9 @@ behind the lock.
 Edits to `shell.json` reload automatically. Missing options use defaults;
 invalid options or unreadable configuration pause automatic sleep and report
 an error. A malformed override never silently enables a different sleep policy.
+Keys on the entry that aren't settings (a typo such as `batterytimeoutSec`
+leaves `batteryTimeoutSec` at its default) don't make it invalid; status lists
+them as `unknownKeys`, and the shell log names them (`config-unknown-keys`).
 Writes that do not change this plugin's settings (bar edits, other plugins) do
 not restart the idle countdown.
 For local source edits or a manually linked installation, run
@@ -163,7 +166,8 @@ remains the responsibility of Omarchy's existing sleep/lock setup.
 omarchy-shell foamy.idle-suspend status
 ```
 
-Status includes the effective policy and sleep action, configuration validity,
+Status includes the effective policy and sleep action, configuration validity
+and `unknownKeys`,
 chassis, power source, Stay awake state, enabled monitors, whether media is
 playing, the current attempt (`phase`, `deferredReason`, `lastLockResult`,
 `failureStreak`, `retryScheduled`) and the latest error. On Omarchy 4.5 the

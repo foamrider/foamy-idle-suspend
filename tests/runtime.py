@@ -499,6 +499,12 @@ try:
     assert len(notes()) == before, 'an inert plugin must not notify'
     write_config(acTimeoutSec=0)
     wait_for(lambda s: not s['configValid'] and not s['enabled'] and 'acTimeoutSec' in s['lastError'])
+    # A misspelled key keeps its default; status and the log list it.
+    assert status()['unknownKeys'] == [], status()
+    write_config(batterytimeoutSec=None)
+    value = wait_for(lambda s: s['configValid'] and s['unknownKeys'] == ['batterytimeoutSec'])
+    assert value['policy']['batteryTimeoutSec'] == 900, value
+    wait_for(lambda s: 'config-unknown-keys: batterytimeoutSec' in (base / 'runtime.log').read_text())
     print('PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, disabled timeouts')
     # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
     process.terminate(); process.wait(timeout=5)
