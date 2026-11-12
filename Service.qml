@@ -151,7 +151,7 @@ Item {
       return
     }
     root.phase = "checking"
-    inhibitorProbe.running = true
+    checkInhibitors()
   }
 
   // Media can start (remote control, a timer) while the asynchronous checks
@@ -162,6 +162,13 @@ Item {
       return false
     root.deferredReason = "media-playing"
     return true
+  }
+
+  // Reset before the start, like the other probes: a start that fails may
+  // never report running, so exitSeen can't be reset from runningChanged.
+  function checkInhibitors() {
+    inhibitorProbe.exitSeen = false
+    inhibitorProbe.running = true
   }
 
   function afterInhibitorCheck(exitCode, text, errorText) {
@@ -208,7 +215,7 @@ Item {
       if (deferForMedia())
         return finishAttempt("suspend-deferred", "media playing")
       root.phase = "rechecking"
-      inhibitorProbe.running = true
+      checkInhibitors()
       return
     }
     // Defense in depth: never sleep with the session exposed. The user is
@@ -629,13 +636,9 @@ Item {
       id: inhibitorErrorOutput
       waitForEnd: true
     }
+    // Not running without an exit: the check couldn't start (no exited()).
     onRunningChanged: {
-      if (running) {
-        exitSeen = false
-        return
-      }
-      // Not running without an exit: the check couldn't start (no exited()).
-      if (exitSeen)
+      if (running || exitSeen)
         return
       exitSeen = true
       root.afterInhibitorCheck(-1, "", "busctl couldn't start")

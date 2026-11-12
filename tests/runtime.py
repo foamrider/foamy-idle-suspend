@@ -60,6 +60,8 @@ for old, new, places in [
     ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
     ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
     ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
+    # The inhibitor check's own `timeout`, so the test can make it unstartable.
+    ('["timeout", "--kill-after=1s", "3s", ', '["%s/inhibit-timeout", "--kill-after=1s", "3s", ' % bin_dir, 1),
     ("busctl --system --json=short call", "%s/busctl --system --json=short call" % bin_dir, 1),
     ("omarchy-shell lock ", "%s/omarchy-shell lock " % bin_dir, 2),
 ]:
@@ -159,6 +161,9 @@ for name in ["hostnamectl", "omarchy", "systemctl", "notify-send", "busctl", "om
     file = bin_dir / name
     file.write_text(command)
     file.chmod(0o755)
+inhibit_timeout = bin_dir / "inhibit-timeout"
+inhibit_timeout.write_text('#!/bin/bash\nexec timeout "$@"\n')
+inhibit_timeout.chmod(0o755)
 # This machine (and most stock installs) cannot hibernate.
 (base / "can-CanSuspendThenHibernate").write_text("na")
 (base / "can-CanHibernate").write_text("na")
@@ -400,6 +405,16 @@ try:
     wait_for(lambda s: len(sleep_calls()) >= count + 1)
     value = wait_for(lambda s: s["phase"] == "idle")
     assert value["lastError"] == "", value
+    active()
+    # A check that can't start ends the attempt the same way, also after
+    # checks that ran (no attempt is left at "checking").
+    inhibit_timeout.chmod(0o644)
+    count = len(sleep_calls())
+    ipc("test", "state", True, True, False)
+    value = wait_for(lambda s: s["deferredReason"] == "inhibitor-check-failed" and s["phase"] == "idle")
+    assert value["lastError"] == "Couldn't check logind inhibitors: busctl couldn't start", value
+    inhibit_timeout.chmod(0o755)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     # Playback or an inhibitor that starts while the lock comes up still defers.
     hold = base / "lock-hold"
