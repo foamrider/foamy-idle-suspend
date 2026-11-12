@@ -333,6 +333,28 @@ try:
     assert len(recorded('omarchy-shell')) == locks, 'lockBeforeSuspend false must not lock'
     active()
     print('PASS: missing lock or a lock that times out refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking')
+    # Sleep off on this machine (logind answers "na", as with Omarchy's
+    # sleep-disabled setting): say so once per configuration, not after every
+    # idle period.
+    (base / 'can-CanSuspend').write_text('na')
+    count = len(sleep_calls())
+    def unavailable_period():
+        before = status()['lastEventAt']
+        ipc('test', 'state', True, True, False)
+        wait_for(lambda s: s['lastEvent'] == 'suspend-unavailable: ' + s['policy']['suspendAction'] and s['lastEventAt'] != before)
+        active()
+    unavailable_period()
+    wait_for(lambda s: notes().count("Sleep isn't available") == 1)
+    unavailable_period()
+    time.sleep(0.5); assert notes().count("Sleep isn't available") == 1, notes()
+    write_config(suspendAction='suspend')
+    wait_for(lambda s: s['policy']['suspendAction'] == 'suspend')
+    unavailable_period()
+    wait_for(lambda s: notes().count("Sleep isn't available") == 2)
+    assert len(sleep_calls()) == count, 'slept although no action is available'
+    (base / 'can-CanSuspend').unlink()
+    write_config()
+    wait_for(lambda s: s['policy']['suspendAction'] == 'auto')
     # Hibernation not set up: fall back to suspend and say so once.
     write_config(suspendAction='suspend-then-hibernate')
     value = wait_for(lambda s: s['actionFallback'] and s['effectiveAction'] == 'suspend')
@@ -352,7 +374,7 @@ try:
     assert sleep_calls()[-1] == ['systemctl', 'suspend']
     active(False)
     (base / 'fail-sleep').unlink()
-    print('PASS: unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off')
+    print('PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off')
     # A sleep request that never ends: the watchdog stops it and reports it
     # once (the killed request's exit changes nothing).
     def log_count(text): return (base / 'runtime.log').read_text().count(text)

@@ -57,6 +57,9 @@ Item {
   property int failureStreak: 0
   // Failure notifications are shown once per idle period.
   property var notified: ({})
+  // "Sleep isn't available" describes the machine, not one idle period:
+  // shown once per configuration (see applyConfiguration).
+  property bool unavailableNotified: false
   property string fallbackNotified: ""
   readonly property int retryBaseMs: 60000
   // How long systemctl may take to hand the sleep request to logind; it
@@ -132,6 +135,8 @@ Item {
     if (!root.effectiveAction) {
       root.processError = "No sleep action is available on this system"
       finishAttempt("suspend-unavailable", root.policy.suspendAction)
+      if (root.unavailableNotified) return
+      root.unavailableNotified = true
       notifyOnce("unavailable", FoamyI18n.t("Sleep isn't available"),
         FoamyI18n.t("This computer reports that it can't suspend, so automatic sleep is off."))
       return
@@ -400,6 +405,7 @@ Item {
     if (Policy.sameConfiguration(root.configuration, next)) return
     var actionChanged = next.settings.suspendAction !== root.policy.suspendAction
     root.configuration = next
+    root.unavailableNotified = false
     root.logEvent(next.valid ? "config-ready" : "config-error", next.error)
     if (actionChanged) probeActions()
     // A deferred attempt has no idle transition left to wake it; re-evaluate
