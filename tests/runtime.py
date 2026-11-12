@@ -1,12 +1,17 @@
-import json, os, pathlib, shutil, subprocess, tempfile, time
+import json, os, pathlib, shutil, subprocess, sys, tempfile, time
 # Use real Quickshell file/process handling with mocked power, idle, media,
 # logind, lock and system commands. Nothing here can suspend or lock the machine.
 source = pathlib.Path(__file__).resolve().parents[1]
-base = pathlib.Path(tempfile.mkdtemp(prefix='foamy-idle-runtime-'))
+KIT = pathlib.Path(os.environ.get('FOAMY_KIT', pathlib.Path.home() / 'GitHub/Personal/foamy-kit'))
+sys.path.insert(0, str(KIT / 'preview'))
+import harness, hostenv  # noqa: E402
+# Short names: Quickshell's IPC socket lives under XDG_RUNTIME_DIR, and a Unix
+# socket path longer than 107 bytes fails ("Failed to start IPC server").
+base = pathlib.Path(tempfile.mkdtemp(prefix='fis-'))
 app = base / 'app'; app.mkdir()
 mock = app / 'mocks'; mock.mkdir()
 bin_dir = base / 'bin'; bin_dir.mkdir()
-runtime = base / 'runtime'; runtime.mkdir(mode=0o700)
+runtime = base / 'r'; runtime.mkdir(mode=0o700)
 config = base / '.config/omarchy/shell.json'; config.parent.mkdir(parents=True)
 state_dir = base / '.local/state/omarchy/indicators'; state_dir.mkdir(parents=True)
 calls = base / 'calls'
@@ -103,17 +108,13 @@ for name in ['hostnamectl', 'omarchy', 'systemctl', 'notify-send', 'busctl', 'om
 # This machine (and most stock installs) cannot hibernate.
 (base / 'can-CanSuspendThenHibernate').write_text('na')
 (base / 'can-CanHibernate').write_text('na')
-# Without an AppImage's bundled binaries and libraries ($APPDIR, for example
-# an editor's) on the search paths: qs and the mocks must load the host's.
-appdir = os.path.realpath(os.environ['APPDIR']) if os.environ.get('APPDIR') else None
-def host_dirs(value):
-    def kept(entry):
-        real = os.path.realpath(entry)
-        return not (appdir and (real == appdir or real.startswith(appdir + '/')))
-    return ':'.join(p for p in value.split(':') if p and kept(p))
-env = dict(os.environ, HOME=str(base), XDG_RUNTIME_DIR=str(runtime), QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='basic', QT_STYLE_OVERRIDE='Fusion',
-           PATH=str(bin_dir) + ':' + host_dirs(os.environ['PATH']), LD_LIBRARY_PATH=host_dirs(os.environ.get('LD_LIBRARY_PATH', '')))
-if not env['LD_LIBRARY_PATH']: del env['LD_LIBRARY_PATH']
+# The kit's isolation for a qs the test starts itself: no Omarchy bin
+# directory or AppImage entry ($APPDIR) on PATH or LD_LIBRARY_PATH, and dead
+# audio and system-bus addresses. Every command the service runs is a mock
+# reached by absolute path (above), so nothing reaches logind or the desktop.
+env = hostenv.isolate(dict(os.environ, HOME=str(base), XDG_RUNTIME_DIR=str(runtime), QT_QPA_PLATFORM='offscreen',
+                           QT_QPA_PLATFORMTHEME='basic', QT_STYLE_OVERRIDE='Fusion'), base)
+env['PATH'] = str(bin_dir) + ':' + env['PATH']
 # Temporary XDG directories too: 4.5's Commons reads the language from the
 # config home, and the desktop's choice must not leak into the notifications.
 env.update(XDG_CONFIG_HOME=str(base / '.config'), XDG_STATE_HOME=str(base / '.local/state'),
@@ -135,14 +136,15 @@ def status(): return json.loads(ipc('foamy.idle-suspend', 'status'))
 # (parallel test runs, Python mocks starting slowly) needs the room, and a
 # passing wait returns as soon as its condition holds.
 def wait_for(predicate, timeout=30):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    def ready():
         try:
             value = status()
-            if predicate(value): return value
-        except (ValueError, subprocess.SubprocessError): pass
-        time.sleep(0.05)
-    raise AssertionError('Timed out: ' + str(status()))
+        except (ValueError, subprocess.SubprocessError):
+            return None
+        return value if predicate(value) else None
+    value = harness.wait_for(ready, timeout, stop=lambda: process.poll() is not None)
+    if value is None: raise AssertionError('Timed out: ' + str(status()))
+    return value
 def recorded(name=None):
     lines = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     return [line for line in lines if name is None or line[0] == name]
@@ -153,6 +155,7 @@ def active(battery=True):
     wait_for(lambda s: s['phase'] == 'idle' and not s['retryScheduled'])
 write_config()
 log = (base / 'runtime.log').open('w')
+passed = False
 process = subprocess.Popen(['qs', '-p', str(app), '--no-color'], env=env, stdout=log, stderr=log)
 try:
     value = wait_for(lambda s: s['enabled'] and s['chassisLoaded'] and s['actionSupport'])
@@ -160,6 +163,8 @@ try:
     assert value['policy']['suspendAction'] == 'auto' and value['effectiveAction'] == 'suspend' and value['autoAction'] == 'suspend'
     assert value['actionSupport']['suspend-then-hibernate'] == 'na' and not value['actionFallback']
     ipc('test', 'state', True, True, True)
+    # The fixed sleeps below are quiet periods: they check that nothing happens
+    # (a sleep request, a second report) within a time the service would need.
     time.sleep(0.15); assert not sleep_calls(), 'Wayland inhibitor did not block sleep'
     # Lock first, then sleep only once the lock reports secure.
     ipc('test', 'state', True, True, False)
@@ -189,12 +194,16 @@ try:
     active()
     assert not [n for n in notes() if "isn't available" in n], 'auto never notifies a fallback'
     print('PASS: auto resolves per attempt (suspend-then-hibernate when logind says yes, else suspend)')
-    # An unrelated shell.json write keeps the idle countdown running.
+    # An unrelated shell.json write keeps the idle countdown running. The
+    # lockBeforeSuspend change after them doesn't touch the idle monitors; once
+    # it shows, the service has read every write before it.
     arms = int(ipc('test', 'arms'))
     write_config(extra=[{'id': 'foamy.other', 'value': 1}])
-    time.sleep(0.4)
     replacement = config.with_suffix('.new'); replacement.write_text(config.read_text()); replacement.replace(config)
-    time.sleep(0.4)
+    write_config(extra=[{'id': 'foamy.other', 'value': 1}], lockBeforeSuspend=False)
+    wait_for(lambda s: s['policy']['lockBeforeSuspend'] is False)
+    write_config()
+    wait_for(lambda s: s['policy']['lockBeforeSuspend'] is True)
     assert int(ipc('test', 'arms')) == arms and status()['configValid'], 'unrelated writes restarted the countdown'
     # Media playback defers sleep until it stops.
     ipc('test', 'playing', True)
@@ -384,10 +393,15 @@ try:
     assert value['chassis'] == 'unknown' and not value['isLaptop'] and not value['enabled'], value
     assert value['lastError'] == "hostnamectl chassis couldn't start", value
     print('PASS: a chassis probe that cannot start is reported and keeps a laptops-only policy off')
+    hostenv.check(env, (base / 'runtime.log').read_text())
+    passed = True
 finally:
     process.terminate()
     try: process.wait(timeout=3)
     except subprocess.TimeoutExpired: process.kill(); process.wait()
     log.close()
-    print('Runtime evidence:', base)
-    print((base / 'runtime.log').read_text()[-3000:])
+    if passed:
+        shutil.rmtree(base)
+    else:
+        print('Runtime evidence:', base)
+        print((base / 'runtime.log').read_text()[-3000:])
