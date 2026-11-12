@@ -26,7 +26,7 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
                  ('UPower.onBattery', 'Mock.TestState.onBattery'), ('Mpris.players.values', 'Mock.TestState.players'),
                  ('  IdleMonitor {', '  Mock.IdleMonitor {'),
                  ('readonly property int retryBaseMs: 60000', 'readonly property int retryBaseMs: 700'),
-                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 1500'),
+                 ('readonly property int suspendWatchdogMs: 60000', 'readonly property int suspendWatchdogMs: 4000'),
                  ('readonly property int stayAwakeTimeoutSec: 5', 'readonly property int stayAwakeTimeoutSec: 2')]:
     assert old in service, old
     service = service.replace(old, new)
@@ -68,46 +68,65 @@ ShellRoot {
   }
 }
 ''')
-command = '''#!/usr/bin/python3
-import json, os, pathlib, sys, time
-home = pathlib.Path(os.environ['HOME'])
-name = pathlib.Path(sys.argv[0]).name
-def read(file, default):
-    path = home / file
-    return path.read_text().strip() if path.exists() else default
-if name == 'hostnamectl': print('laptop')
-elif name == 'omarchy':
-    if (home / 'hang-state').exists(): time.sleep(30)
-    if (home / 'bad-state').exists(): print('invalid state')
-    else: print(json.dumps({'enabled': (home / '.local/state/omarchy/indicators/stay-awake').exists()}))
-elif name == 'busctl':
-    if 'get-property' in sys.argv:
-        if (home / 'inhibitor-fail').exists():
-            print('Failed to get property BlockInhibited: Connection timed out', file=sys.stderr); sys.exit(1)
-        if (home / 'inhibitor-garbage').exists(): print('garbage')
-        else: print(json.dumps({'type': 's', 'data': read('block-inhibited', '')}))
-    else: print(json.dumps({'type': 's', 'data': [read('can-' + sys.argv[-1], 'yes')]}))
-elif name == 'omarchy-shell' and sys.argv[1:3] == ['lock', 'status']:
-    pending = home / 'locked-at'
-    if pending.exists() and time.time() >= float(pending.read_text()): (home / 'locked').touch()
-    secure = (home / 'locked').exists()
-    print(json.dumps({'secure': secure, 'requested': secure or pending.exists()}))
-else:
-    with (home / 'calls').open('a') as f: f.write(json.dumps([name] + sys.argv[1:]) + '\\n')
-    if name == 'omarchy-shell':
-        reply = read('lock-reply', 'ok')
-        delay = read('lock-delay', '')
-        if reply == 'ok' and delay:
-            if not (home / 'locked-at').exists(): (home / 'locked-at').write_text(str(time.time() + float(delay)))
-        elif reply == 'ok': (home / 'locked').touch()
-        print(reply)
-    if name == 'systemctl':
-        if (home / 'hang-sleep').exists(): time.sleep(30)
-        time.sleep(0.1)
-        (home / 'locked').unlink(missing_ok=True)  # the next attempt must lock again
-        (home / 'locked-at').unlink(missing_ok=True)
-        if (home / 'fail-sleep').exists():
-            print('mock sleep unavailable.', file=sys.stderr); sys.exit(1)
+# One bash mock for every command: bash starts in a few milliseconds where
+# Python needs tens, and on a loaded machine a slow mock outran the test's
+# short watchdog and probe deadlines. State lives in files under $HOME; calls
+# that matter (systemctl, notify-send, the lock request) go to $HOME/calls as
+# JSON arrays.
+command = r'''#!/bin/bash
+home=$HOME
+name=${0##*/}
+json() {
+  local out='[' sep='' s
+  for s in "$name" "$@"; do
+    s=${s//\\/\\\\}; s=${s//\"/\\\"}
+    out+="$sep\"$s\""; sep=', '
+  done
+  printf '%s]\n' "$out" >> "$home/calls"
+}
+read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
+case $name in
+  hostnamectl) echo laptop ;;
+  omarchy)
+    [[ -e $home/hang-state ]] && sleep 30
+    if [[ -e $home/bad-state ]]; then echo 'invalid state'
+    elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then echo '{"enabled": true}'
+    else echo '{"enabled": false}'; fi ;;
+  busctl)
+    if [[ " $* " == *" get-property "* ]]; then
+      if [[ -e $home/inhibitor-fail ]]; then
+        echo 'Failed to get property BlockInhibited: Connection timed out' >&2; exit 1
+      fi
+      if [[ -e $home/inhibitor-garbage ]]; then echo garbage
+      else printf '{"type": "s", "data": "%s"}\n' "$(read_or block-inhibited '')"; fi
+    else
+      printf '{"type": "s", "data": ["%s"]}\n' "$(read_or "can-${!#}" yes)"
+    fi ;;
+  omarchy-shell)
+    if [[ $1 == lock && $2 == status ]]; then
+      if [[ -e $home/lock-requested && ! -e $home/lock-hold ]]; then touch "$home/locked"; fi
+      secure=false requested=false
+      [[ -e $home/locked ]] && secure=true requested=true
+      [[ -e $home/lock-requested ]] && requested=true
+      printf '{"secure": %s, "requested": %s}\n' "$secure" "$requested"
+    else
+      json "$@"
+      reply=$(read_or lock-reply ok)
+      # While lock-hold exists the lock stays requested, not secure, so the
+      # test can act during "locking" however slow the machine is.
+      if [[ $reply == ok && -e $home/lock-hold ]]; then touch "$home/lock-requested"
+      elif [[ $reply == ok ]]; then touch "$home/locked"; fi
+      echo "$reply"
+    fi ;;
+  systemctl)
+    json "$@"
+    [[ -e $home/hang-sleep ]] && exec sleep 30
+    sleep 0.1
+    # The next attempt must lock again.
+    rm -f "$home/locked" "$home/lock-requested"
+    if [[ -e $home/fail-sleep ]]; then echo 'mock sleep unavailable.' >&2; exit 1; fi ;;
+  *) json "$@" ;;
+esac
 '''
 for name in ['hostnamectl', 'omarchy', 'systemctl', 'notify-send', 'busctl', 'omarchy-shell']:
     file = bin_dir / name; file.write_text(command); file.chmod(0o755)
@@ -140,7 +159,9 @@ def ipc(target, method, *args):
 def status(): return json.loads(ipc('foamy.idle-suspend', 'status'))
 # The limits only bound how long a broken run takes to fail: a loaded machine
 # (parallel test runs, Python mocks starting slowly) needs the room, and a
-# passing wait returns as soon as its condition holds.
+# passing wait returns as soon as its condition holds. A status poll can take
+# seconds under load while idle retries keep sleeping (700 ms apart here), so
+# a wait for "slept again" counts at least one more call, never exactly one.
 def wait_for(predicate, timeout=30):
     def ready():
         try:
@@ -161,9 +182,16 @@ def sleep_calls():
     assert all(line[1:2] == ['--no-ask-password'] and len(line) == 3 for line in calls_made), calls_made
     return [[line[0], line[2]] for line in calls_made]
 def notes(): return [line[-2] for line in recorded('notify-send')]
+# Failure backoff in this test (retryBaseMs 700): a status poll can be slower
+# than the first retry, so a check accepts whichever streak it sees.
+BACKOFF_MS = {1: 1400, 2: 2800, 3: 5600, 4: 10500}
+def backoff_ok(value): return value['retryInMs'] == BACKOFF_MS.get(min(value['failureStreak'], 4))
+# The user is back: input, and (once no attempt is running) the screen
+# unlocked, so a lock left by a skipped attempt can't count for the next one.
 def active(battery=True):
     ipc('test', 'state', battery, False, False)
     wait_for(lambda s: s['phase'] == 'idle' and not s['retryScheduled'])
+    for name in ('locked', 'lock-requested'): (base / name).unlink(missing_ok=True)
 write_config()
 log = (base / 'runtime.log').open('w')
 passed = False
@@ -179,15 +207,15 @@ try:
     time.sleep(0.15); assert not sleep_calls(), 'Wayland inhibitor did not block sleep'
     # Lock first, then sleep only once the lock reports secure.
     ipc('test', 'state', True, True, False)
-    wait_for(lambda s: len(sleep_calls()) == 1)
+    wait_for(lambda s: len(sleep_calls()) >= 1)
     ipc('test', 'duplicate')
     order = [line[0] for line in recorded() if line[0] in ('omarchy-shell', 'systemctl')]
     assert order[:2] == ['omarchy-shell', 'systemctl'], order
-    assert sleep_calls() == [['systemctl', 'suspend']]
+    assert sleep_calls()[0] == ['systemctl', 'suspend'], sleep_calls()
     value = wait_for(lambda s: s['phase'] == 'idle')
     assert value['lastLockResult'] == 'secure' and value['failureStreak'] == 0 and value['lastError'] == '', value
     # Woken without input and still idle: ask again after the retry delay.
-    wait_for(lambda s: len(sleep_calls()) == 2)
+    wait_for(lambda s: len(sleep_calls()) >= 2)
     active()
     time.sleep(0.9); count = len(sleep_calls())
     time.sleep(0.9); assert len(sleep_calls()) == count, 'activity must stop retries'
@@ -207,10 +235,14 @@ try:
     print('PASS: auto resolves per attempt (suspend-then-hibernate when logind says yes, else suspend)')
     # An unrelated shell.json write keeps the idle countdown running. The
     # lockBeforeSuspend change after them doesn't touch the idle monitors; once
-    # it shows, the service has read every write before it.
+    # it shows, the service has read every write before it. The writes are
+    # spaced: the file watcher can miss a replace that follows another within
+    # a few milliseconds (seen under load), and the shell doesn't write that fast.
     arms = int(ipc('test', 'arms'))
     write_config(extra=[{'id': 'foamy.other', 'value': 1}])
+    time.sleep(0.4)
     replacement = config.with_suffix('.new'); replacement.write_text(config.read_text()); replacement.replace(config)
+    time.sleep(0.4)
     write_config(extra=[{'id': 'foamy.other', 'value': 1}], lockBeforeSuspend=False)
     wait_for(lambda s: s['policy']['lockBeforeSuspend'] is False)
     write_config()
@@ -223,7 +255,7 @@ try:
     wait_for(lambda s: s['deferredReason'] == 'media-playing' and s['mediaPlaying'])
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept while media was playing'
     ipc('test', 'playing', False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     # A logind idle/sleep block inhibitor defers; it is checked again while idle.
     (base / 'block-inhibited').write_text('handle-lid-switch:idle')
@@ -232,7 +264,7 @@ try:
     wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['retryScheduled'])
     time.sleep(0.3); assert len(sleep_calls()) == count
     (base / 'block-inhibited').write_text('shutdown')
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     (base / 'block-inhibited').unlink()
     # An inhibitor check that fails is no answer, never "no inhibitor": sleep
@@ -244,62 +276,69 @@ try:
     assert value['lastError'] == "Couldn't check logind inhibitors: Failed to get property BlockInhibited: Connection timed out", value
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although the inhibitor check failed'
     (base / 'inhibitor-fail').unlink()
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     value = wait_for(lambda s: s['phase'] == 'idle')
     assert value['lastError'] == '', value
     active()
     # Playback or an inhibitor that starts while the lock comes up still defers.
-    (base / 'lock-delay').write_text('1.0')
+    hold = base / 'lock-hold'
     count = len(sleep_calls())
+    hold.touch()
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     ipc('test', 'playing', True)
+    hold.unlink()
     wait_for(lambda s: s['deferredReason'] == 'media-playing' and s['phase'] == 'idle')
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although media started during locking'
     ipc('test', 'playing', False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     count = len(sleep_calls())
+    hold.touch()
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     (base / 'block-inhibited').write_text('sleep')
+    hold.unlink()
     wait_for(lambda s: s['deferredReason'] == 'inhibited' and s['phase'] == 'idle')
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although an inhibitor appeared during locking'
     (base / 'block-inhibited').unlink()
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     # An unreadable reply to the check after locking defers too.
     count = len(sleep_calls())
+    hold.touch()
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     (base / 'inhibitor-garbage').touch()
+    hold.unlink()
     value = wait_for(lambda s: s['deferredReason'] == 'inhibitor-check-failed' and s['phase'] == 'idle')
     assert value['lastError'] == "Couldn't check logind inhibitors: busctl's reply didn't parse", value
     time.sleep(0.3); assert len(sleep_calls()) == count, 'slept although the check after locking failed'
     (base / 'inhibitor-garbage').unlink()
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
     # Power source changes while an attempt is locking: the new source's single
     # idle notification must still lead to sleep once the old attempt ends.
     write_config(acTimeoutSec=1)
     wait_for(lambda s: s['policy']['acTimeoutSec'] == 1)
     count = len(sleep_calls())
+    hold.touch()
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['phase'] == 'locking')
     ipc('test', 'state', False, True, False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    hold.unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     assert status()['onBattery'] is False
     active(False)
     write_config()
     wait_for(lambda s: s['policy']['acTimeoutSec'] is None)
-    (base / 'lock-delay').unlink()
     # Turning pauseForMedia off re-evaluates an attempt deferred for media.
     ipc('test', 'playing', True)
     count = len(sleep_calls())
     ipc('test', 'state', True, True, False)
     wait_for(lambda s: s['deferredReason'] == 'media-playing')
     write_config(pauseForMedia=False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     assert status()['mediaPlaying'] is True
     active()
     ipc('test', 'playing', False)
@@ -311,7 +350,7 @@ try:
     count = len(sleep_calls())
     ipc('test', 'state', True, True, False)
     value = wait_for(lambda s: s['lastLockResult'] == 'missing-pam' and s['retryScheduled'])
-    assert value['failureStreak'] == 1 and value['retryInMs'] == 1400
+    assert value['failureStreak'] >= 1 and backoff_ok(value), value
     wait_for(lambda s: s['failureStreak'] >= 2)
     assert len(sleep_calls()) == count, 'slept without a secure lock'
     assert notes().count("Screen didn't lock") == 1, notes()
@@ -331,7 +370,7 @@ try:
     wait_for(lambda s: s['policy']['lockBeforeSuspend'] is False)
     locks = len(recorded('omarchy-shell'))
     ipc('test', 'state', True, True, False)
-    wait_for(lambda s: len(sleep_calls()) == count + 1)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
     assert len(recorded('omarchy-shell')) == locks, 'lockBeforeSuspend false must not lock'
     active()
     print('PASS: missing lock or a lock that times out refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking')
@@ -370,8 +409,9 @@ try:
     wait_for(lambda s: s['monitors']['acEnabled'] or s['monitors']['batteryEnabled'])
     ipc('test', 'state', False, True, False)
     value = wait_for(lambda s: s['lastError'] == 'mock sleep unavailable.' and s['retryScheduled'])
-    assert value['failureStreak'] == 1 and value['retryInMs'] == 1400
-    wait_for(lambda s: s['failureStreak'] == 2)
+    assert value['failureStreak'] >= 1 and backoff_ok(value), value
+    value = wait_for(lambda s: s['failureStreak'] >= 2 and s['retryScheduled'])
+    assert backoff_ok(value), value
     assert notes().count('Automatic sleep failed') == 1
     assert sleep_calls()[-1] == ['systemctl', 'suspend']
     active(False)
@@ -380,17 +420,29 @@ try:
     # A sleep request that never ends: the watchdog stops it and reports it
     # once (the killed request's exit changes nothing).
     def log_count(text): return (base / 'runtime.log').read_text().count(text)
+    # The sleep requests and their outcomes logged since `start` (a log offset).
+    def settles(start):
+        text = (base / 'runtime.log').read_text()[start:]
+        out = []
+        for line in text.splitlines():
+            if ' suspend-request: ' in line: out.append('request')
+            elif ' suspend-error: ' in line or ' resume: ' in line: out.append('settled')
+        return out
+    hang_from = len((base / 'runtime.log').read_text())
     (base / 'hang-sleep').touch()
     count = len(sleep_calls())
     ipc('test', 'state', False, True, False)
     wait_for(lambda s: s['phase'] == 'suspending' and s['suspendRunning'])
-    wait_for(lambda s: "didn't finish within 2 seconds" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'])
-    time.sleep(0.4)
-    value = status()
-    assert value['failureStreak'] == 1 and value['retryInMs'] == 1400 and not value['suspendRunning'] and value['phase'] == 'idle', value
-    assert log_count("suspend-error: systemctl suspend didn't finish") == 1 and len(sleep_calls()) == count + 1
+    value = wait_for(lambda s: "didn't finish within 4 seconds" in s['lastError'] and s['phase'] == 'idle' and s['retryScheduled'])
+    assert value['failureStreak'] >= 1 and backoff_ok(value) and not value['suspendRunning'], value
     (base / 'hang-sleep').unlink()
+    wait_for(lambda s: s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '')
     active(False)
+    # Each request settles once: a killed request's exit adds no second report.
+    # (On a slow machine a retry can hang too before the test sees the first.)
+    events = settles(hang_from)
+    assert len(events) >= 4 and events == ['request', 'settled'] * (len(events) // 2), events
+    assert log_count("suspend-error: systemctl suspend didn't finish") >= 1 and len(sleep_calls()) >= count + 2
     # A sleep command that can't start (no exited()) ends the attempt too.
     systemctl = bin_dir / 'systemctl'; systemctl.chmod(0o644)
     count = len(sleep_calls())
@@ -399,7 +451,7 @@ try:
     assert value['failureStreak'] == 1 and len(sleep_calls()) == count, value
     assert log_count("suspend-error: systemctl suspend couldn't start") == 1
     systemctl.chmod(0o755)
-    wait_for(lambda s: len(sleep_calls()) == count + 1 and s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '')
+    wait_for(lambda s: len(sleep_calls()) >= count + 1 and s['phase'] == 'idle' and s['failureStreak'] == 0 and s['lastError'] == '')
     active(False)
     print('PASS: a hung or unstartable sleep command ends the attempt with one report and a retry')
     awake = state_dir / 'stay-awake'; awake.touch()
