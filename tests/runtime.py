@@ -338,8 +338,8 @@ try:
     # An unrelated shell.json write keeps the idle countdown running. The
     # lockBeforeSuspend change after them doesn't touch the idle monitors; once
     # it shows, the service has read every write before it. The writes are
-    # spaced: the file watcher can miss a replace that follows another within
-    # a few milliseconds (seen under load), and the shell doesn't write that fast.
+    # spaced so that each one is read on its own (writes within a millisecond
+    # can be read as one; the burst case below covers those).
     arms = int(ipc("test", "arms"))
     write_config(extra=[{"id": "foamy.other", "value": 1}])
     time.sleep(0.4)
