@@ -532,6 +532,18 @@ try:
     wait_for(lambda s: notes().count("Screen didn't lock") == 2)
     active()
     (base / "lock-reply").unlink()
+    # A lock that can't start is no secure lock: no sleep, the usual report
+    # and a retry, instead of staying at "locking".
+    lock_timeout.chmod(0o644)
+    ipc("test", "state", True, True, False)
+    value = wait_for(lambda s: s["lastLockResult"] == "start-failed" and s["phase"] == "idle")
+    assert value["lastError"] == "The screen did not lock (start-failed)" and value["retryScheduled"], value
+    assert len(sleep_calls()) == count, "slept although the lock couldn't start"
+    wait_for(lambda s: notes().count("Screen didn't lock") == 3)
+    lock_timeout.chmod(0o755)
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    active()
+    count = len(sleep_calls())
     write_config(lockBeforeSuspend=False)
     wait_for(lambda s: s["policy"]["lockBeforeSuspend"] is False)
     locks = len(recorded("omarchy-shell"))
@@ -540,7 +552,7 @@ try:
     assert len(recorded("omarchy-shell")) == locks, "lockBeforeSuspend false must not lock"
     active()
     print(
-        "PASS: missing lock or a lock that times out refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking"
+        "PASS: missing lock, a lock that times out or one that cannot start refuses sleep with one notification and backoff; lockBeforeSuspend false skips locking"
     )
     # Sleep off on this machine (logind answers "na", as with Omarchy's
     # sleep-disabled setting): say so once per configuration, not after every

@@ -200,6 +200,8 @@ Item {
       runSuspend()
     } else if (root.policy.lockBeforeSuspend) {
       root.phase = "locking"
+      // Reset before the start: a start that fails never reports running.
+      lockProcess.exitSeen = false
       lockProcess.running = true
     } else {
       runSuspend()
@@ -676,14 +678,24 @@ Item {
   // or timeout.
   Process {
     id: lockProcess
+    property bool exitSeen: false
     command: ["timeout", "--kill-after=1s", "12s", "bash", "-c", 'request() { case $(timeout --kill-after=0.2s 2s omarchy-shell lock lock 2>/dev/null) in missing-pam) echo missing-pam; exit 3;; esac; }; ' + 'request; ' + 'for _ in $(seq 1 40); do ' + 'state=$(timeout --kill-after=0.2s 1s omarchy-shell lock status 2>/dev/null | jq -r \'if .secure == true then "secure" elif .requested == true then "locking" else "idle" end\' 2>/dev/null); ' + 'case $state in secure) echo secure; exit 0;; locking) ;; *) request;; esac; ' + 'sleep 0.2; done; echo timeout; exit 4']
     stdout: StdioCollector {
       id: lockOutput
       waitForEnd: true
     }
     onExited: function (exitCode) {
+      lockProcess.exitSeen = true
       var result = String(lockOutput.text || "").trim().split("\n").pop()
       root.afterLock(exitCode === 0 && result === "secure" ? "secure" : (result || "timeout"))
+    }
+    // Not running without an exit: the lock couldn't start (no exited()).
+    // That is no secure lock, so no sleep, instead of waiting at "locking".
+    onRunningChanged: {
+      if (running || exitSeen)
+        return
+      exitSeen = true
+      root.afterLock("start-failed")
     }
   }
 
