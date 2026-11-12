@@ -238,7 +238,7 @@ def status():
 # passing wait returns as soon as its condition holds. A status poll can take
 # seconds under load while idle retries keep sleeping (700 ms apart here), so
 # a wait for "slept again" counts at least one more call, never exactly one.
-def wait_for(predicate, timeout=30):
+def wait_for(predicate, timeout=30, fail=True):
     def ready():
         try:
             value = status()
@@ -247,7 +247,7 @@ def wait_for(predicate, timeout=30):
         return value if predicate(value) else None
 
     value = harness.wait_for(ready, timeout, stop=lambda: process.poll() is not None)
-    if value is None:
+    if value is None and fail:
         raise AssertionError("Timed out: " + str(status()))
     return value
 
@@ -382,6 +382,21 @@ try:
     assert "JSON" in value["lastError"] and not value["enabled"], value
     write_config()
     wait_for(lambda s: s["configValid"] and s["policy"]["acTimeoutSec"] is None)
+    # Writes in quick succession (the shell can save twice in one turn) end on
+    # the last one. Quickshell's FileView can miss a change that lands while a
+    # read is still running, which left the settings one write behind until
+    # some later write (4-8 bursts in 100, with the shell otherwise idle).
+    stale_bursts = []
+    for burst in range(80):
+        time.sleep(0.3)  # an idle shell, as when a tool or the settings save
+        last = 1000 + 3 * burst + 2
+        for value in range(last - 2, last + 1):
+            write_config(acTimeoutSec=value)
+        if not wait_for(lambda s, last=last: s["policy"]["acTimeoutSec"] == last, 5, fail=False):
+            stale_bursts.append((burst, status()["policy"]["acTimeoutSec"]))
+    assert not stale_bursts, "bursts that stayed on an earlier write (burst, value): %s" % stale_bursts
+    write_config()
+    wait_for(lambda s: s["configValid"] and s["policy"]["acTimeoutSec"] is None)
     # Media playback defers sleep until it stops.
     ipc("test", "playing", True)
     count = len(sleep_calls())
@@ -509,7 +524,7 @@ try:
     write_config()
     wait_for(lambda s: s["policy"]["pauseForMedia"] is True)
     print(
-        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
+        "PASS: unrelated config writes and in-place rewrites keep the countdown, bursts of writes end on the last one, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
     )
     # No secure lock, no sleep: notify once and retry while idle.
     (base / "lock-reply").write_text("missing-pam")
