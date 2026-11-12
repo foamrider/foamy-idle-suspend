@@ -191,19 +191,20 @@ are Omarchy, Quickshell with Wayland, UPower and MPRIS, systemd (`systemctl`,
 is required on standard Omarchy.
 
 ```sh
-node --test tests/*.test.cjs
-python3 -I -B tests/runtime.py
-bash tests/kit-check.sh
-qmllint Service.qml
-omarchy plugin validate .
+mise install              # once: the pinned linters and formatters
+tests/validate.sh         # kit-check, plugin validate, linters, formatters, tests/suite.sh
+tests/validate.sh --ci    # what CI runs: no Quickshell, no Omarchy host
+tests/suite.sh            # just the tests: node, runtime.py, the kit's i18n check
 ```
 
+The runtime test and the language check import the harness from a foamy-kit
+checkout (`FOAMY_KIT`, default `~/GitHub/Personal/foamy-kit`).
 The runtime test targets Omarchy 4.5 and loads the installed
 `/usr/share/omarchy/shell/Commons`; set `FOAMY_TEST_COMMONS` to another Omarchy
 `shell/Commons` directory to run it against that tree.
 
 The runtime test uses a temporary home with mocked power, idle events, and
-system commands. It tests real Quickshell configuration watching and process
+system commands (bash stand-ins reached by absolute path). It tests real Quickshell configuration watching and process
 handling, including invalid settings, failed, hung and unstartable sleep
 requests, and status commands that can't start. It requires
 local IPC socket access and never suspends the machine. Actual compositor idle
