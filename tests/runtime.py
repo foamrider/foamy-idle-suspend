@@ -646,8 +646,11 @@ try:
     value = wait_for(
         lambda s: "didn't finish within 4 seconds" in s["lastError"] and s["phase"] == "idle" and s["retryScheduled"]
     )
-    assert value["failureStreak"] >= 1 and backoff_ok(value) and not value["suspendRunning"], value
+    assert value["failureStreak"] >= 1 and backoff_ok(value), value
     (base / "hang-sleep").unlink()
+    # The killed request ends: SIGKILL is reaped asynchronously, so it may
+    # still show as running in the first status after the report.
+    wait_for(lambda s: not s["suspendRunning"], 10)
     wait_for(lambda s: s["phase"] == "idle" and s["failureStreak"] == 0 and s["lastError"] == "")
     active(False)
     # Each request settles once: a killed request's exit adds no second report.
