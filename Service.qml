@@ -197,7 +197,11 @@ Item {
     if (deferForMedia()) return finishAttempt("suspend-deferred", "media playing")
     root.phase = "suspending"
     root.processError = ""
-    suspendProcess.command = ["systemctl", root.effectiveAction]
+    // No polkit prompt: logind can answer "challenge" (a sleep inhibitor
+    // taken just now, site rules), and a password dialog behind the lock
+    // would wait for nobody until the watchdog. Without it the request fails
+    // at once and is reported and retried like any other failure.
+    suspendProcess.command = ["systemctl", "--no-ask-password", root.effectiveAction]
     logEvent("suspend-request", root.attemptSource + " " + root.effectiveAction)
     root.suspendAttempts += 1
     suspendProcess.attempt = root.suspendAttempts

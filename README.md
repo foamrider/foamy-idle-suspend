@@ -126,7 +126,10 @@ four and eight, and every fifteen minutes after that. After a successful request
 later, so a wake without input (an RTC alarm, a USB device, the lid) does not
 leave the computer awake on battery. Any input stops the retries. Enabling the plugin enables this automatic policy;
 it does not ask for confirmation at each timeout. System authorization rules
-still apply to the sleep request.
+still apply to the sleep request, and it never asks for a password
+(`systemctl --no-ask-password`): a request that needs authentication fails and
+is reported like any other failure, since nobody is there to answer a prompt
+behind the lock.
 
 ### Applying settings
 

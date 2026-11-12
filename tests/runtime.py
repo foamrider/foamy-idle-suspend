@@ -32,7 +32,7 @@ for old, new in [('import Quickshell.Services.UPower', 'import "mocks" as Mock')
 # Every command the service runs, by absolute path to its mock, with the
 # number of places that run it: a mock that can't start must never fall
 # through to the real command on PATH, and a new call site must be added here.
-for old, new, places in [('["systemctl", root.effectiveAction]', '["%s/systemctl", root.effectiveAction]' % bin_dir, 1),
+for old, new, places in [('["systemctl", ', '["%s/systemctl", ' % bin_dir, 1),
                          ('["omarchy", "toggle", "idle", "status"]', '["%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
                          ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
                          ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
@@ -148,7 +148,12 @@ def wait_for(predicate, timeout=30):
 def recorded(name=None):
     lines = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     return [line for line in lines if name is None or line[0] == name]
-def sleep_calls(): return recorded('systemctl')
+# Every sleep request refuses interactive authorization: polkit must never
+# prompt behind the lock with nobody there. Returns [name, action] per call.
+def sleep_calls():
+    calls_made = recorded('systemctl')
+    assert all(line[1:2] == ['--no-ask-password'] and len(line) == 3 for line in calls_made), calls_made
+    return [[line[0], line[2]] for line in calls_made]
 def notes(): return [line[-2] for line in recorded('notify-send')]
 def active(battery=True):
     ipc('test', 'state', battery, False, False)
