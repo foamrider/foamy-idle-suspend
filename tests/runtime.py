@@ -1,11 +1,19 @@
-import json, os, pathlib, shutil, subprocess, sys, tempfile, time
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 
 # Use real Quickshell file/process handling with mocked power, idle, media,
 # logind, lock and system commands. Nothing here can suspend or lock the machine.
 source = pathlib.Path(__file__).resolve().parents[1]
 KIT = pathlib.Path(os.environ.get("FOAMY_KIT", pathlib.Path.home() / "GitHub/Personal/foamy-kit"))
 sys.path.insert(0, str(KIT / "preview"))
-import harness, hostenv  # noqa: E402
+import harness
+import hostenv
 
 # Short names: Quickshell's IPC socket lives under XDG_RUNTIME_DIR, and a Unix
 # socket path longer than 107 bytes fails ("Failed to start IPC server").

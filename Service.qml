@@ -107,7 +107,7 @@ Item {
     if (notified[key])
       return
     var next = {}
-    for (var name in notified)
+    for (const name in notified)
       next[name] = true
     next[key] = true
     notified = next
@@ -534,7 +534,7 @@ Item {
         try {
           if (exitCode !== 0)
             throw new Error("idle status exited " + exitCode)
-          var state = JSON.parse(awakeOutput.text)
+          const state = JSON.parse(awakeOutput.text)
           if (typeof state.enabled !== "boolean")
             throw new Error("idle status missing enabled")
           root.syncStayAwakeNotification(state.enabled)
