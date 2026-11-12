@@ -309,8 +309,18 @@ Item {
   }
 
   function probeActions() {
-    if (!actionProbe.running)
-      actionProbe.running = true
+    if (actionProbe.running)
+      return
+    // Reset before the start: a start that fails never reports running.
+    actionProbe.exitSeen = false
+    actionProbe.running = true
+  }
+
+  // The probe's one way to end: its exit, or a start that failed.
+  function afterActionProbeRun(text) {
+    root.applyActionProbe(text)
+    if (root.phase === "probing")
+      root.afterActionProbe()
   }
 
   function applyActionProbe(text) {
@@ -610,15 +620,26 @@ Item {
   // Omarchy only does on request, so suspend-then-hibernate is often "na".
   Process {
     id: actionProbe
+    property bool exitSeen: false
     command: ["timeout", "--kill-after=1s", "5s", "bash", "-c", 'for m in CanSuspend CanHibernate CanHybridSleep CanSuspendThenHibernate; do printf "%s " "$m"; busctl --system --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$m" 2>/dev/null || echo "{}"; done']
     stdout: StdioCollector {
       id: actionOutput
       waitForEnd: true
     }
     onExited: {
-      root.applyActionProbe(actionOutput.text)
-      if (root.phase === "probing")
-        root.afterActionProbe()
+      actionProbe.exitSeen = true
+      root.afterActionProbeRun(actionOutput.text)
+    }
+    // Not running without an exit: the probe couldn't start (no exited()).
+    // No answer for any action, like a failed busctl call inside the probe:
+    // the attempt goes on and systemctl decides, instead of waiting at
+    // "probing" for good.
+    onRunningChanged: {
+      if (running || exitSeen)
+        return
+      exitSeen = true
+      root.logEvent("actions-error", "the action probe couldn't start")
+      root.afterActionProbeRun("")
     }
   }
 
