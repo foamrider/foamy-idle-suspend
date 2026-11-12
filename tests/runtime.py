@@ -182,9 +182,11 @@ for wrapper in (inhibit_timeout, probe_timeout, lock_timeout):
 (base / "can-CanSuspendThenHibernate").write_text("na")
 (base / "can-CanHibernate").write_text("na")
 # The kit's isolation for a qs the test starts itself: no Omarchy bin
-# directory or AppImage entry ($APPDIR) on PATH or LD_LIBRARY_PATH, and dead
-# audio and system-bus addresses. Every command the service runs is a mock
-# reached by absolute path (above), so nothing reaches logind or the desktop.
+# directory or AppImage entry ($APPDIR) on PATH or LD_LIBRARY_PATH, dead
+# audio, system-bus and session-bus addresses, and no display variables. The
+# test needs no bus (qs ipc uses a socket under XDG_RUNTIME_DIR). Every
+# command the service runs is a mock reached by absolute path (above), so
+# nothing reaches logind or the desktop.
 env = hostenv.isolate(
     dict(
         os.environ,
@@ -205,8 +207,7 @@ env.update(
     XDG_CACHE_HOME=str(base / ".cache"),
     XDG_DATA_HOME=str(base / ".local/share"),
 )
-for name in ("WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "OMARCHY_LANGUAGE_FILE"):
-    env.pop(name, None)
+env.pop("OMARCHY_LANGUAGE_FILE", None)
 
 
 # Atomic, like the shell's own shell.json writes (FileView atomicWrites): an
@@ -246,7 +247,7 @@ def wait_for(predicate, timeout=30):
             return None
         return value if predicate(value) else None
 
-    value = harness.wait_for(ready, timeout, stop=lambda: process.poll() is not None)
+    value = harness.wait_for(ready, timeout, stop=lambda: process.exit_status() is not None)
     if value is None:
         raise AssertionError("Timed out: " + str(status()))
     return value
@@ -290,7 +291,9 @@ def active(battery=True):
 write_config()
 log = (base / "runtime.log").open("w")
 passed = False
-process = subprocess.Popen(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+# qs leads its own process group: stop() also ends the mocks and scripts its
+# Processes started, where Popen.terminate() reached qs alone.
+process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
 try:
     value = wait_for(lambda s: s["enabled"] and s["chassisLoaded"] and s["actionSupport"])
     assert value["policy"]["batteryTimeoutSec"] == 900 and value["policy"]["acTimeoutSec"] is None
@@ -360,7 +363,7 @@ try:
         return (base / "runtime.log").read_text(errors="replace")
 
     def log_shows(text, start):
-        return harness.wait_for(lambda: text in log_text()[start:], 30, stop=lambda: process.poll() is not None)
+        return harness.wait_for(lambda: text in log_text()[start:], 30, stop=lambda: process.exit_status() is not None)
 
     start = len(log_text())
     full = json.dumps({"version": 1, "plugins": [{"id": "foamy.idle-suspend", "acTimeoutSec": 1700}]})
@@ -734,11 +737,10 @@ try:
         "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, disabled timeouts"
     )
     # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
-    process.terminate()
-    process.wait(timeout=5)
+    process.stop()
     write_config()
     (bin_dir / "hostnamectl").unlink()
-    process = subprocess.Popen(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
     value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
     assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
     assert value["lastError"] == "hostnamectl chassis couldn't start", value
@@ -751,12 +753,7 @@ try:
     )
     passed = True
 finally:
-    process.terminate()
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+    process.stop()
     log.close()
     if passed:
         shutil.rmtree(base)
