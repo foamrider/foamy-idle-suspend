@@ -212,3 +212,14 @@ test('BlockInhibited is read from busctl output; a failed or unreadable check is
     assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
   assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
 });
+
+test('the manifest id is the entry parseConfig reads', () => {
+  // The shell keys each plugins[] entry by the manifest id; a rename on one
+  // side only would leave no valid entry, and automatic sleep off.
+  const manifest = require('../manifest.json');
+  const text = JSON.stringify({ version: 1, plugins: [{ id: manifest.id, batteryTimeoutSec: 60 }] });
+  assert.equal(Policy.parseConfig(text).settings.batteryTimeoutSec, 60);
+  // The host keeps a keepLoaded service running across a plugin hot reload,
+  // so an idle countdown is not restarted by it.
+  assert.equal(manifest.keepLoaded, true);
+});
