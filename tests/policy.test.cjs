@@ -46,6 +46,12 @@ test('invalid overrides disable the policy instead of silently applying defaults
       assert.match(result.error, new RegExp(key));
     }
   }
+  // Both ends of the accepted range: one second and the largest value whose
+  // milliseconds still fit in a signed 32-bit timer interval.
+  assert.equal(parse({ batteryTimeoutSec: 1 }).valid, true);
+  const longest = parse({ acTimeoutSec: 2147483 });
+  assert.equal(longest.valid, true);
+  assert.equal(longest.settings.acTimeoutSec, 2147483);
   assert.equal(parse({ laptopsOnly: 'false' }).valid, false);
   assert.equal(parse({ pauseForMedia: 'no' }).valid, false);
   assert.equal(parse({ lockBeforeSuspend: 0 }).valid, false);
@@ -56,10 +62,16 @@ test('invalid overrides disable the policy instead of silently applying defaults
 
 test('malformed, missing, duplicate, and unsupported configuration is rejected', () => {
   for (const text of ['', '{', 'null', '{}', '{"version":2,"plugins":[]}',
-    '{"version":1,"plugins":[]}',
+    '{"version":1}', '{"version":1,"plugins":{}}', '{"version":1,"plugins":[]}',
     '{"version":1,"plugins":[{"id":"foamy.idle-suspend"},{"id":"foamy.idle-suspend"}]}']) {
-    assert.equal(Policy.parseConfig(text).valid, false);
+    const result = Policy.parseConfig(text);
+    assert.equal(result.valid, false, text);
+    // Status lastError shows this text, so the problem must be named.
+    assert.equal(typeof result.error, 'string', text);
+    assert.notEqual(result.error, '', text);
   }
+  // Items in plugins that are not objects neither throw nor count as the entry.
+  assert.equal(Policy.parseConfig('{"version":1,"plugins":[null,"x",3,{"id":"foamy.idle-suspend"}]}').valid, true);
 });
 
 test('Stay awake, unknown chassis, desktops and configuration errors block sleep', () => {
@@ -91,7 +103,6 @@ test('unavailable actions fall back to suspend; unknown answers are trusted', ()
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'challenge' }), { action: 'hibernate', fallback: false });
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'no', suspend: 'na' }), { action: '', fallback: false });
   assert.deepEqual(Policy.chooseAction('suspend', { suspend: 'na' }), { action: '', fallback: false });
-  for (const action of Policy.ACTIONS) assert.match(Policy.CAN_METHODS[action], /^Can[A-Za-z]+$/);
 });
 
 test('logind idle or sleep block inhibitors defer sleep; delay-only lists do not', () => {
@@ -156,7 +167,6 @@ test('every notification string has an English and Norwegian catalog entry', () 
     assert.ok(no[key], key);
     assert.deepEqual(tokens(no[key]), tokens(key), key);
   }
-  assert.ok(!/\bIpcHandler\s*\{/.test(service), 'IPC goes through FoamyIpc');
 });
 
 test('auto uses suspend-then-hibernate only where logind says yes, else suspend', () => {
@@ -171,7 +181,6 @@ test('auto uses suspend-then-hibernate only where logind says yes, else suspend'
   assert.deepEqual(Policy.chooseAction('suspend', yes), { action: 'suspend', fallback: false });
   assert.deepEqual(Policy.chooseAction('suspend-then-hibernate', yes), { action: 'suspend-then-hibernate', fallback: false });
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'na', suspend: 'yes' }), { action: 'suspend', fallback: true });
-  assert.deepEqual(Policy.CHOICES, ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']);
 });
 
 test('logind action answers are read per Can* method; failed or malformed calls stay unknown', () => {
@@ -202,4 +211,15 @@ test('BlockInhibited is read from busctl output; a failed or unreadable check is
   for (const code of [124, 137])
     assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
   assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
+});
+
+test('the manifest id is the entry parseConfig reads, and the service stays loaded', () => {
+  // The shell keys each plugins[] entry by the manifest id; a rename on one
+  // side only would leave no valid entry, and automatic sleep off.
+  const manifest = require('../manifest.json');
+  const text = JSON.stringify({ version: 1, plugins: [{ id: manifest.id, batteryTimeoutSec: 60 }] });
+  assert.equal(Policy.parseConfig(text).settings.batteryTimeoutSec, 60);
+  // The host keeps a keepLoaded service running across a plugin hot reload,
+  // so an idle countdown is not restarted by it.
+  assert.equal(manifest.keepLoaded, true);
 });

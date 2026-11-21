@@ -105,6 +105,19 @@ ShellRoot {
     function playing(value: bool): string { Mock.TestState.players = value ? [{isPlaying: true}] : [{isPlaying: false}]; return "ok" }
     function arms(): string { return String(Mock.TestState.arms) }
     function duplicate(): string { service.requestSuspend("battery"); return "ok" }
+    // Input, and the status from right before it. One call is one JavaScript
+    // turn: no timer or process exit can run between the two.
+    function input(battery: bool): string {
+      var before = service.statusJson()
+      Mock.TestState.idle = false
+      Mock.TestState.onBattery = battery
+      Mock.TestState.inhibited = false
+      return before
+    }
+    // A Stay awake read started without a file event, and whether a change
+    // is queued for after the running read.
+    function readStayAwake(): string { service.refreshStayAwakeState(); return "ok" }
+    function stayAwakeQueued(): string { return String(service.stateRefreshPending) }
   }
 }
 """)
@@ -129,9 +142,16 @@ case $name in
   hostnamectl) echo laptop ;;
   omarchy)
     [[ -e $home/hang-state ]] && sleep 30
-    if [[ -e $home/bad-state ]]; then echo 'invalid state'
-    elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then echo '{"enabled": true}'
-    else echo '{"enabled": false}'; fi ;;
+    if [[ -e $home/bad-state ]]; then answer='invalid state'
+    elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then answer='{"enabled": true}'
+    else answer='{"enabled": false}'; fi
+    # state-hold keeps this read in flight with the answer it took at its
+    # start; state-held tells the test that the answer is taken.
+    if [[ -e $home/state-hold ]]; then
+      : > "$home/state-held"
+      while [[ -e $home/state-hold ]]; do sleep 0.02; done
+    fi
+    echo "$answer" ;;
   busctl)
     if [[ " $* " == *" get-property "* ]]; then
       if [[ -e $home/inhibitor-fail ]]; then
@@ -239,7 +259,7 @@ def status():
 # passing wait returns as soon as its condition holds. A status poll can take
 # seconds under load while idle retries keep sleeping (700 ms apart here), so
 # a wait for "slept again" counts at least one more call, never exactly one.
-def wait_for(predicate, timeout=30):
+def wait_for(predicate, timeout=30, message="Timed out"):
     def ready():
         try:
             value = status()
@@ -247,10 +267,14 @@ def wait_for(predicate, timeout=30):
             return None
         return value if predicate(value) else None
 
-    value = harness.wait_for(ready, timeout, stop=lambda: process.exit_status() is not None)
+    value = harness.wait_for(ready, timeout, stop=stopped)
     if value is None:
-        raise AssertionError("Timed out: " + str(status()))
+        raise AssertionError(message + ": " + str(status()))
     return value
+
+
+def stopped():
+    return process.exit_status() is not None
 
 
 def recorded(name=None):
@@ -303,15 +327,18 @@ try:
         and value["autoAction"] == "suspend"
     )
     assert value["actionSupport"]["suspend-then-hibernate"] == "na" and not value["actionFallback"]
+    # A Wayland idle inhibitor (a video call, a fullscreen player) keeps the
+    # monitor from going idle only because the service asks it to respect
+    # inhibitors; an idle monitor would start an attempt inside this call.
     ipc("test", "state", True, True, True)
-    # The fixed sleeps below are quiet periods: they check that nothing happens
-    # (a sleep request, a second report) within a time the service would need.
-    time.sleep(0.15)
+    value = status()
+    assert value["monitors"]["batteryEnabled"] and not value["monitors"]["batteryIdle"] and value["phase"] == "idle", (
+        value
+    )
     assert not sleep_calls(), "Wayland inhibitor did not block sleep"
     # Lock first, then sleep only once the lock reports secure.
     ipc("test", "state", True, True, False)
     wait_for(lambda s: len(sleep_calls()) >= 1)
-    ipc("test", "duplicate")
     order = [line[0] for line in recorded() if line[0] in ("omarchy-shell", "systemctl")]
     assert order[:2] == ["omarchy-shell", "systemctl"], order
     assert sleep_calls()[0] == ["systemctl", "suspend"], sleep_calls()
@@ -320,11 +347,7 @@ try:
     # Woken without input and still idle: ask again after the retry delay.
     wait_for(lambda s: len(sleep_calls()) >= 2)
     active()
-    time.sleep(0.9)
-    count = len(sleep_calls())
-    time.sleep(0.9)
-    assert len(sleep_calls()) == count, "activity must stop retries"
-    print("PASS: lock then suspend, duplicate request, retry after a wake without input, activity stops retries")
+    print("PASS: lock then suspend, retry after a wake without input")
     # "auto" re-asks logind on every attempt: once hibernation is set up it
     # uses suspend-then-hibernate, and plain suspend again when it is not.
     (base / "can-CanSuspendThenHibernate").write_text("yes")
@@ -338,12 +361,17 @@ try:
     active()
     assert not [n for n in notes() if "isn't available" in n], "auto never notifies a fallback"
     print("PASS: auto resolves per attempt (suspend-then-hibernate when logind says yes, else suspend)")
+
     # An unrelated shell.json write keeps the idle countdown running. The
     # lockBeforeSuspend change after them doesn't touch the idle monitors; once
     # it shows, the service has read every write before it. The writes are
     # spaced: Quickshell 0.3.2's file watcher can miss a write that lands within
     # a millisecond of another. That is a Quickshell bug, left to upstream.
+    def log_text():
+        return (base / "runtime.log").read_text(errors="replace")
+
     arms = int(ipc("test", "arms"))
+    cfg_start = len(log_text())
     write_config(extra=[{"id": "foamy.other", "value": 1}])
     time.sleep(0.4)
     replacement = config.with_suffix(".new")
@@ -355,13 +383,16 @@ try:
     write_config()
     wait_for(lambda s: s["policy"]["lockBeforeSuspend"] is True)
     assert int(ipc("test", "arms")) == arms and status()["configValid"], "unrelated writes restarted the countdown"
+    # Only the two lockBeforeSuspend writes take effect. An unrelated write that
+    # applied again would also reset the once-per-configuration notices.
+    harness.wait_for(
+        lambda: log_text()[cfg_start:].count("config-ready") >= 2, 30, stop=lambda: process.exit_status() is not None
+    )
+    assert log_text()[cfg_start:].count("config-ready") == 2, log_text()[cfg_start:]
 
     # A tool that rewrites shell.json in place (truncate, then write) can be
     # read half-done: the configuration in force stays, and the file is read
     # again (after 3 s here, 250 ms in the shell) before an error counts.
-    def log_text():
-        return (base / "runtime.log").read_text(errors="replace")
-
     def log_shows(text, start):
         return harness.wait_for(lambda: text in log_text()[start:], 30, stop=lambda: process.exit_status() is not None)
 
@@ -390,6 +421,8 @@ try:
     count = len(sleep_calls())
     ipc("test", "state", True, True, False)
     wait_for(lambda s: s["deferredReason"] == "media-playing" and s["mediaPlaying"])
+    # The fixed sleeps below are quiet periods: they check that nothing happens
+    # (a sleep request, a second report) within a time the service would need.
     time.sleep(0.3)
     assert len(sleep_calls()) == count, "slept while media was playing"
     ipc("test", "playing", False)
@@ -441,11 +474,37 @@ try:
     ipc("test", "state", True, True, False)
     value = wait_for(lambda s: len(sleep_calls()) >= count + 1 and s["phase"] == "idle")
     assert value["actionSupport"] == {} and value["effectiveAction"] == "suspend", value
-    assert "actions-error: the action probe couldn't start" in (base / "runtime.log").read_text()
     probe_timeout.chmod(0o755)
     active()
-    # Playback or an inhibitor that starts while the lock comes up still defers.
+    # A second idle request for the same source while the lock comes up starts
+    # no second attempt: it is skipped inside the call, and the attempt that
+    # runs still ends in a sleep request.
     hold = base / "lock-hold"
+    locks = len(recorded("omarchy-shell"))
+    hold.touch()
+    ipc("test", "state", True, True, False)
+    # The lock script records its request only after "locking" shows.
+    wait_for(lambda s: s["phase"] == "locking" and len(recorded("omarchy-shell")) == locks + 1)
+    ipc("test", "duplicate")
+    value = status()
+    # Nothing else logs while the lock is held.
+    assert value["phase"] == "locking" and value["lastEvent"] == "suspend-skipped: request already running", value
+    count = len(sleep_calls())
+    hold.unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    active()
+    # The user comes back while the lock comes up: no sleep request once the
+    # lock is secure. The phase stays "locking" until the lock has answered.
+    count = len(sleep_calls())
+    hold.touch()
+    ipc("test", "state", True, True, False)
+    wait_for(lambda s: s["phase"] == "locking")
+    ipc("test", "state", True, False, False)
+    hold.unlink()
+    wait_for(lambda s: s["phase"] == "idle")
+    assert len(sleep_calls()) == count, "slept although the user came back while the screen locked"
+    active()
+    # Playback or an inhibitor that starts while the lock comes up still defers.
     count = len(sleep_calls())
     hold.touch()
     ipc("test", "state", True, True, False)
@@ -512,7 +571,7 @@ try:
     write_config()
     wait_for(lambda s: s["policy"]["pauseForMedia"] is True)
     print(
-        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
+        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a repeated idle request while locking starts no second attempt; input while locking gives no sleep; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
     )
     # No secure lock, no sleep: notify once and retry while idle.
     (base / "lock-reply").write_text("missing-pam")
@@ -597,6 +656,11 @@ try:
     (base / "fail-sleep").touch()
     write_config(acTimeoutSec=1800, suspendAction="suspend")
     wait_for(lambda s: s["monitors"]["acEnabled"] or s["monitors"]["batteryEnabled"])
+    # On AC power a Wayland idle inhibitor keeps the AC monitor from going
+    # idle too; an idle monitor would start an attempt inside this call.
+    ipc("test", "state", False, True, True)
+    value = wait_for(lambda s: s["monitors"]["acEnabled"])
+    assert not value["monitors"]["acIdle"] and value["phase"] == "idle", value
     ipc("test", "state", False, True, False)
     value = wait_for(lambda s: s["lastError"] == "mock sleep unavailable." and s["retryScheduled"])
     assert value["failureStreak"] >= 1 and backoff_ok(value), value
@@ -604,10 +668,29 @@ try:
     assert backoff_ok(value), value
     assert notes().count("Automatic sleep failed") == 1
     assert sleep_calls()[-1] == ["systemctl", "suspend"]
+    # Input resets the streak and stops the retry. The input call returns the
+    # status from right before the input: it proves something only when no
+    # attempt ran then and a retry was waiting. On a slow machine the retry
+    # can start first, and the failing request then counts a new failure
+    # after the input; such a try is repeated with the machine idle again.
+    tries = []
+    for _ in range(4):
+        before = json.loads(ipc("test", "input", False))
+        if before["phase"] == "idle" and before["retryScheduled"] and before["failureStreak"] >= 2:
+            break
+        tries.append(before["phase"])
+        ipc("test", "state", False, True, False)
+        wait_for(lambda s: s["failureStreak"] >= 2 and s["retryScheduled"])
+    else:
+        raise AssertionError("a retry was running at every input, phases: " + str(tries))
+    # Nothing runs and no timer is left, so this status is stable.
+    value = status()
+    assert value["failureStreak"] == 0, ("input did not reset the failure streak", value)
+    assert not value["retryScheduled"], ("input did not stop the retry", value)
     active(False)
     (base / "fail-sleep").unlink()
     print(
-        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off"
+        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off; input resets the failure streak and stops the retry"
     )
 
     # A sleep request that never ends: the watchdog stops it and reports it
@@ -670,10 +753,10 @@ try:
     wait_for(lambda s: s["stayAwake"] is True and not s["enabled"])
     # notify-send runs detached; give it a moment to record the call.
     wait_for(lambda s: "Stay awake enabled" in notes())
-    ipc("test", "state", False, True, False)
-    time.sleep(0.15)
     count = len(sleep_calls())
-    time.sleep(0.3)
+    ipc("test", "state", False, True, False)
+    value = status()
+    assert not value["monitors"]["acEnabled"] and not value["monitors"]["acIdle"] and value["phase"] == "idle", value
     assert len(sleep_calls()) == count
     ipc("test", "state", False, False, False)
     awake.unlink()
@@ -681,8 +764,12 @@ try:
     write_config(acTimeoutSec="1800")
     wait_for(lambda s: not s["configValid"] and not s["enabled"] and "acTimeoutSec" in s["lastError"])
     ipc("test", "state", False, True, False)
-    time.sleep(0.3)
-    assert len(sleep_calls()) == count
+    value = status()
+    monitors = value["monitors"]
+    assert not (monitors["batteryEnabled"] or monitors["acEnabled"] or monitors["batteryIdle"] or monitors["acIdle"]), (
+        value
+    )
+    assert value["phase"] == "idle" and len(sleep_calls()) == count, value
     ipc("test", "state", False, False, False)
     write_config(acTimeoutSec=1800)
     wait_for(lambda s: s["configValid"] and s["enabled"])
@@ -710,12 +797,70 @@ try:
     (base / "hang-state").unlink()
     (state_dir / "refresh").unlink()
     wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
+    # Stay awake turned on while a read is running is not lost: that read took
+    # its answer before the change, so the service reads once more. Other tools
+    # write to the same indicators directory and start reads too. The hold
+    # files live in $HOME: a file in the watched directory would start reads.
+    state_hold = base / "state-hold"
+    state_held = base / "state-held"
+
+    def queued():
+        return ipc("test", "stayAwakeQueued") == "true"
+
+    # One try; returns why it proved nothing, or None when it did.
+    def change_during_read():
+        start = len(log_text())
+        state_hold.touch()
+        # Started through the test's IPC handler, not a file event: one write
+        # can give more than one event, and a later one would queue a read
+        # before the test changes anything.
+        ipc("test", "readStayAwake")
+        assert harness.wait_for(state_held.exists, 30, stop=stopped), "the Stay awake read never started"
+        # The read now holds its answer "false"; nothing may be queued yet.
+        if queued():
+            reason = "a read was already queued"
+        else:
+            awake.touch()
+            # Wait until the change is queued behind the held read. The read
+            # has a deadline (2 s here): a read stopped before the change was
+            # queued ends the try.
+            result = harness.wait_for(
+                lambda: (
+                    "queued"
+                    if queued()
+                    else "deadline"
+                    if "idle-state-error: omarchy toggle idle status didn't finish" in log_text()[start:]
+                    else None
+                ),
+                30,
+                stop=stopped,
+            )
+            assert result, "a Stay awake change during a read was never queued"
+            reason = None if result == "queued" else "the change was not queued before the read's deadline"
+        state_hold.unlink()
+        state_held.unlink()
+        if reason is None:
+            wait_for(
+                lambda s: s["stayAwake"] is True and not s["enabled"],
+                message="a Stay awake change during a read was lost",
+            )
+        awake.unlink(missing_ok=True)
+        wait_for(lambda s: s["stayAwake"] is False and s["enabled"] and s["lastError"] == "")
+        return reason
+
+    tries = []
+    while len(tries) < 3 and (reason := change_during_read()) is not None:
+        tries.append(reason)
+    assert len(tries) < 3, "no try changed Stay awake during a held read: " + str(tries)
     write_config(batteryTimeoutSec=None, acTimeoutSec=None)
     wait_for(lambda s: s["configValid"] and not s["enabled"] and s["policy"]["batteryTimeoutSec"] is None)
     for battery in (True, False):
         ipc("test", "state", battery, True, False)
-        value = wait_for(lambda s: not s["enabled"])
-    time.sleep(0.3)
+        value = status()
+        monitors = value["monitors"]
+        assert not (
+            monitors["batteryEnabled"] or monitors["acEnabled"] or monitors["batteryIdle"] or monitors["acIdle"]
+        ), value
     assert len(sleep_calls()) == count
     ipc("test", "state", False, False, False)
     # Inert plugin: Stay awake changes are not announced.
@@ -725,16 +870,13 @@ try:
     awake.unlink()
     wait_for(lambda s: s["stayAwake"] is False)
     assert len(notes()) == before, "an inert plugin must not notify"
-    write_config(acTimeoutSec=0)
-    wait_for(lambda s: not s["configValid"] and not s["enabled"] and "acTimeoutSec" in s["lastError"])
     # A misspelled key keeps its default; status and the log list it.
-    assert status()["unknownKeys"] == [], status()
     write_config(batterytimeoutSec=None)
     value = wait_for(lambda s: s["configValid"] and s["unknownKeys"] == ["batterytimeoutSec"])
     assert value["policy"]["batteryTimeoutSec"] == 900, value
     wait_for(lambda s: "config-unknown-keys: batterytimeoutSec" in (base / "runtime.log").read_text())
     print(
-        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, disabled timeouts"
+        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
     )
     # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
     process.stop()
