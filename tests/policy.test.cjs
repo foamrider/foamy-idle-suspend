@@ -213,7 +213,7 @@ test('BlockInhibited is read from busctl output; a failed or unreadable check is
   assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
 });
 
-test('the manifest id is the entry parseConfig reads', () => {
+test('the manifest id is the entry parseConfig reads, and the service stays loaded', () => {
   // The shell keys each plugins[] entry by the manifest id; a rename on one
   // side only would leave no valid entry, and automatic sleep off.
   const manifest = require('../manifest.json');

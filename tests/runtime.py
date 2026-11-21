@@ -457,7 +457,7 @@ try:
     active()
     # A second idle request for the same source while the lock comes up starts
     # no second attempt: it is skipped inside the call, and the attempt that
-    # runs still ends in one sleep request.
+    # runs still ends in a sleep request.
     hold = base / "lock-hold"
     locks = len(recorded("omarchy-shell"))
     hold.touch()
@@ -635,6 +635,11 @@ try:
     (base / "fail-sleep").touch()
     write_config(acTimeoutSec=1800, suspendAction="suspend")
     wait_for(lambda s: s["monitors"]["acEnabled"] or s["monitors"]["batteryEnabled"])
+    # On AC power a Wayland idle inhibitor keeps the AC monitor from going
+    # idle too; an idle monitor would start an attempt inside this call.
+    ipc("test", "state", False, True, True)
+    value = wait_for(lambda s: s["monitors"]["acEnabled"])
+    assert not value["monitors"]["acIdle"] and value["phase"] == "idle", value
     ipc("test", "state", False, True, False)
     value = wait_for(lambda s: s["lastError"] == "mock sleep unavailable." and s["retryScheduled"])
     assert value["failureStreak"] >= 1 and backoff_ok(value), value
@@ -642,8 +647,9 @@ try:
     assert backoff_ok(value), value
     assert notes().count("Automatic sleep failed") == 1
     assert sleep_calls()[-1] == ["systemctl", "suspend"]
-    # Input resets the streak and stops the retry. The next retry is 2.8 s or
-    # more away, so it can't have fired since the wait above.
+    # Input resets the streak and stops the retry. The next retry is at least
+    # 2.8 s away. A status round trip slower than that can let it run first;
+    # a failure here with failureStreak 1 is that race, not a broken reset.
     ipc("test", "state", False, False, False)
     value = status()
     assert value["failureStreak"] == 0 and not value["retryScheduled"], value
@@ -766,6 +772,10 @@ try:
     (state_dir / "refresh").touch()
     wait_for(lambda s: s["stayAwake"] is None)  # a read is in flight, holding "false"
     awake.touch()
+    # A status round trip gives qs time to handle the change event while the
+    # read is still held; otherwise the read could end first, and the step
+    # would pass without the second read.
+    status()
     state_hold.unlink()
     wait_for(lambda s: s["stayAwake"] is True and not s["enabled"])
     awake.unlink()
