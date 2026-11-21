@@ -46,6 +46,12 @@ test('invalid overrides disable the policy instead of silently applying defaults
       assert.match(result.error, new RegExp(key));
     }
   }
+  // Both ends of the accepted range: one second and the largest value whose
+  // milliseconds still fit in a signed 32-bit timer interval.
+  assert.equal(parse({ batteryTimeoutSec: 1 }).valid, true);
+  const longest = parse({ acTimeoutSec: 2147483 });
+  assert.equal(longest.valid, true);
+  assert.equal(longest.settings.acTimeoutSec, 2147483);
   assert.equal(parse({ laptopsOnly: 'false' }).valid, false);
   assert.equal(parse({ pauseForMedia: 'no' }).valid, false);
   assert.equal(parse({ lockBeforeSuspend: 0 }).valid, false);
@@ -56,10 +62,16 @@ test('invalid overrides disable the policy instead of silently applying defaults
 
 test('malformed, missing, duplicate, and unsupported configuration is rejected', () => {
   for (const text of ['', '{', 'null', '{}', '{"version":2,"plugins":[]}',
-    '{"version":1,"plugins":[]}',
+    '{"version":1}', '{"version":1,"plugins":{}}', '{"version":1,"plugins":[]}',
     '{"version":1,"plugins":[{"id":"foamy.idle-suspend"},{"id":"foamy.idle-suspend"}]}']) {
-    assert.equal(Policy.parseConfig(text).valid, false);
+    const result = Policy.parseConfig(text);
+    assert.equal(result.valid, false, text);
+    // Status lastError shows this text, so the problem must be named.
+    assert.equal(typeof result.error, 'string', text);
+    assert.notEqual(result.error, '', text);
   }
+  // Items in plugins that are not objects neither throw nor count as the entry.
+  assert.equal(Policy.parseConfig('{"version":1,"plugins":[null,"x",3,{"id":"foamy.idle-suspend"}]}').valid, true);
 });
 
 test('Stay awake, unknown chassis, desktops and configuration errors block sleep', () => {
