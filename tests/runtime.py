@@ -105,6 +105,19 @@ ShellRoot {
     function playing(value: bool): string { Mock.TestState.players = value ? [{isPlaying: true}] : [{isPlaying: false}]; return "ok" }
     function arms(): string { return String(Mock.TestState.arms) }
     function duplicate(): string { service.requestSuspend("battery"); return "ok" }
+    // Input, and the status from right before it. One call is one JavaScript
+    // turn: no timer or process exit can run between the two.
+    function input(battery: bool): string {
+      var before = service.statusJson()
+      Mock.TestState.idle = false
+      Mock.TestState.onBattery = battery
+      Mock.TestState.inhibited = false
+      return before
+    }
+    // A Stay awake read started without a file event, and whether a change
+    // is queued for after the running read.
+    function readStayAwake(): string { service.refreshStayAwakeState(); return "ok" }
+    function stayAwakeQueued(): string { return String(service.stateRefreshPending) }
   }
 }
 """)
@@ -132,8 +145,12 @@ case $name in
     if [[ -e $home/bad-state ]]; then answer='invalid state'
     elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then answer='{"enabled": true}'
     else answer='{"enabled": false}'; fi
-    # state-hold keeps this read in flight with the answer it took at its start.
-    while [[ -e $home/state-hold ]]; do sleep 0.02; done
+    # state-hold keeps this read in flight with the answer it took at its
+    # start; state-held tells the test that the answer is taken.
+    if [[ -e $home/state-hold ]]; then
+      : > "$home/state-held"
+      while [[ -e $home/state-hold ]]; do sleep 0.02; done
+    fi
     echo "$answer" ;;
   busctl)
     if [[ " $* " == *" get-property "* ]]; then
@@ -242,7 +259,7 @@ def status():
 # passing wait returns as soon as its condition holds. A status poll can take
 # seconds under load while idle retries keep sleeping (700 ms apart here), so
 # a wait for "slept again" counts at least one more call, never exactly one.
-def wait_for(predicate, timeout=30):
+def wait_for(predicate, timeout=30, message="Timed out"):
     def ready():
         try:
             value = status()
@@ -250,10 +267,14 @@ def wait_for(predicate, timeout=30):
             return None
         return value if predicate(value) else None
 
-    value = harness.wait_for(ready, timeout, stop=lambda: process.exit_status() is not None)
+    value = harness.wait_for(ready, timeout, stop=stopped)
     if value is None:
-        raise AssertionError("Timed out: " + str(status()))
+        raise AssertionError(message + ": " + str(status()))
     return value
+
+
+def stopped():
+    return process.exit_status() is not None
 
 
 def recorded(name=None):
@@ -647,12 +668,25 @@ try:
     assert backoff_ok(value), value
     assert notes().count("Automatic sleep failed") == 1
     assert sleep_calls()[-1] == ["systemctl", "suspend"]
-    # Input resets the streak and stops the retry. The next retry is at least
-    # 2.8 s away. A status round trip slower than that can let it run first;
-    # a failure here with failureStreak 1 is that race, not a broken reset.
-    ipc("test", "state", False, False, False)
+    # Input resets the streak and stops the retry. The input call returns the
+    # status from right before the input: it proves something only when no
+    # attempt ran then and a retry was waiting. On a slow machine the retry
+    # can start first, and the failing request then counts a new failure
+    # after the input; such a try is repeated with the machine idle again.
+    tries = []
+    for _ in range(4):
+        before = json.loads(ipc("test", "input", False))
+        if before["phase"] == "idle" and before["retryScheduled"] and before["failureStreak"] >= 2:
+            break
+        tries.append(before["phase"])
+        ipc("test", "state", False, True, False)
+        wait_for(lambda s: s["failureStreak"] >= 2 and s["retryScheduled"])
+    else:
+        raise AssertionError("a retry was running at every input, phases: " + str(tries))
+    # Nothing runs and no timer is left, so this status is stable.
     value = status()
-    assert value["failureStreak"] == 0 and not value["retryScheduled"], value
+    assert value["failureStreak"] == 0, ("input did not reset the failure streak", value)
+    assert not value["retryScheduled"], ("input did not stop the retry", value)
     active(False)
     (base / "fail-sleep").unlink()
     print(
@@ -765,22 +799,59 @@ try:
     wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
     # Stay awake turned on while a read is running is not lost: that read took
     # its answer before the change, so the service reads once more. Other tools
-    # write to the same indicators directory and start reads too. The hold file
-    # lives in $HOME: a file in the watched directory would start reads itself.
+    # write to the same indicators directory and start reads too. The hold
+    # files live in $HOME: a file in the watched directory would start reads.
     state_hold = base / "state-hold"
-    state_hold.touch()
-    (state_dir / "refresh").touch()
-    wait_for(lambda s: s["stayAwake"] is None)  # a read is in flight, holding "false"
-    awake.touch()
-    # A status round trip gives qs time to handle the change event while the
-    # read is still held; otherwise the read could end first, and the step
-    # would pass without the second read.
-    status()
-    state_hold.unlink()
-    wait_for(lambda s: s["stayAwake"] is True and not s["enabled"])
-    awake.unlink()
-    (state_dir / "refresh").unlink()
-    wait_for(lambda s: s["stayAwake"] is False and s["enabled"] and s["lastError"] == "")
+    state_held = base / "state-held"
+
+    def queued():
+        return ipc("test", "stayAwakeQueued") == "true"
+
+    # One try; returns why it proved nothing, or None when it did.
+    def change_during_read():
+        start = len(log_text())
+        state_hold.touch()
+        # Started through the test's IPC handler, not a file event: one write
+        # can give more than one event, and a later one would queue a read
+        # before the test changes anything.
+        ipc("test", "readStayAwake")
+        assert harness.wait_for(state_held.exists, 30, stop=stopped), "the Stay awake read never started"
+        # The read now holds its answer "false"; nothing may be queued yet.
+        if queued():
+            reason = "a read was already queued"
+        else:
+            awake.touch()
+            # Wait until the change is queued behind the held read. The read
+            # has a deadline (2 s here): a read stopped before the change was
+            # queued ends the try.
+            result = harness.wait_for(
+                lambda: (
+                    "queued"
+                    if queued()
+                    else "deadline"
+                    if "idle-state-error: omarchy toggle idle status didn't finish" in log_text()[start:]
+                    else None
+                ),
+                30,
+                stop=stopped,
+            )
+            assert result, "a Stay awake change during a read was never queued"
+            reason = None if result == "queued" else "the change was not queued before the read's deadline"
+        state_hold.unlink()
+        state_held.unlink()
+        if reason is None:
+            wait_for(
+                lambda s: s["stayAwake"] is True and not s["enabled"],
+                message="a Stay awake change during a read was lost",
+            )
+        awake.unlink(missing_ok=True)
+        wait_for(lambda s: s["stayAwake"] is False and s["enabled"] and s["lastError"] == "")
+        return reason
+
+    tries = []
+    while len(tries) < 3 and (reason := change_during_read()) is not None:
+        tries.append(reason)
+    assert len(tries) < 3, "no try changed Stay awake during a held read: " + str(tries)
     write_config(batteryTimeoutSec=None, acTimeoutSec=None)
     wait_for(lambda s: s["configValid"] and not s["enabled"] and s["policy"]["batteryTimeoutSec"] is None)
     for battery in (True, False):
