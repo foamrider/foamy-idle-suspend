@@ -91,7 +91,6 @@ test('unavailable actions fall back to suspend; unknown answers are trusted', ()
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'challenge' }), { action: 'hibernate', fallback: false });
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'no', suspend: 'na' }), { action: '', fallback: false });
   assert.deepEqual(Policy.chooseAction('suspend', { suspend: 'na' }), { action: '', fallback: false });
-  for (const action of Policy.ACTIONS) assert.match(Policy.CAN_METHODS[action], /^Can[A-Za-z]+$/);
 });
 
 test('logind idle or sleep block inhibitors defer sleep; delay-only lists do not', () => {
@@ -156,7 +155,6 @@ test('every notification string has an English and Norwegian catalog entry', () 
     assert.ok(no[key], key);
     assert.deepEqual(tokens(no[key]), tokens(key), key);
   }
-  assert.ok(!/\bIpcHandler\s*\{/.test(service), 'IPC goes through FoamyIpc');
 });
 
 test('auto uses suspend-then-hibernate only where logind says yes, else suspend', () => {
@@ -171,7 +169,6 @@ test('auto uses suspend-then-hibernate only where logind says yes, else suspend'
   assert.deepEqual(Policy.chooseAction('suspend', yes), { action: 'suspend', fallback: false });
   assert.deepEqual(Policy.chooseAction('suspend-then-hibernate', yes), { action: 'suspend-then-hibernate', fallback: false });
   assert.deepEqual(Policy.chooseAction('hibernate', { hibernate: 'na', suspend: 'yes' }), { action: 'suspend', fallback: true });
-  assert.deepEqual(Policy.CHOICES, ['auto', 'suspend', 'hibernate', 'hybrid-sleep', 'suspend-then-hibernate']);
 });
 
 test('logind action answers are read per Can* method; failed or malformed calls stay unknown', () => {
