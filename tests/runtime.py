@@ -129,9 +129,12 @@ case $name in
   hostnamectl) echo laptop ;;
   omarchy)
     [[ -e $home/hang-state ]] && sleep 30
-    if [[ -e $home/bad-state ]]; then echo 'invalid state'
-    elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then echo '{"enabled": true}'
-    else echo '{"enabled": false}'; fi ;;
+    if [[ -e $home/bad-state ]]; then answer='invalid state'
+    elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then answer='{"enabled": true}'
+    else answer='{"enabled": false}'; fi
+    # state-hold keeps this read in flight with the answer it took at its start.
+    while [[ -e $home/state-hold ]]; do sleep 0.02; done
+    echo "$answer" ;;
   busctl)
     if [[ " $* " == *" get-property "* ]]; then
       if [[ -e $home/inhibitor-fail ]]; then
@@ -469,6 +472,17 @@ try:
     hold.unlink()
     wait_for(lambda s: len(sleep_calls()) >= count + 1)
     active()
+    # The user comes back while the lock comes up: no sleep request once the
+    # lock is secure. The phase stays "locking" until the lock has answered.
+    count = len(sleep_calls())
+    hold.touch()
+    ipc("test", "state", True, True, False)
+    wait_for(lambda s: s["phase"] == "locking")
+    ipc("test", "state", True, False, False)
+    hold.unlink()
+    wait_for(lambda s: s["phase"] == "idle")
+    assert len(sleep_calls()) == count, "slept although the user came back while the screen locked"
+    active()
     # Playback or an inhibitor that starts while the lock comes up still defers.
     count = len(sleep_calls())
     hold.touch()
@@ -536,7 +550,7 @@ try:
     write_config()
     wait_for(lambda s: s["policy"]["pauseForMedia"] is True)
     print(
-        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a repeated idle request while locking starts no second attempt; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
+        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a repeated idle request while locking starts no second attempt; input while locking gives no sleep; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
     )
     # No secure lock, no sleep: notify once and retry while idle.
     (base / "lock-reply").write_text("missing-pam")
@@ -743,6 +757,20 @@ try:
     (base / "hang-state").unlink()
     (state_dir / "refresh").unlink()
     wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
+    # Stay awake turned on while a read is running is not lost: that read took
+    # its answer before the change, so the service reads once more. Other tools
+    # write to the same indicators directory and start reads too. The hold file
+    # lives in $HOME: a file in the watched directory would start reads itself.
+    state_hold = base / "state-hold"
+    state_hold.touch()
+    (state_dir / "refresh").touch()
+    wait_for(lambda s: s["stayAwake"] is None)  # a read is in flight, holding "false"
+    awake.touch()
+    state_hold.unlink()
+    wait_for(lambda s: s["stayAwake"] is True and not s["enabled"])
+    awake.unlink()
+    (state_dir / "refresh").unlink()
+    wait_for(lambda s: s["stayAwake"] is False and s["enabled"] and s["lastError"] == "")
     write_config(batteryTimeoutSec=None, acTimeoutSec=None)
     wait_for(lambda s: s["configValid"] and not s["enabled"] and s["policy"]["batteryTimeoutSec"] is None)
     for battery in (True, False):
@@ -767,7 +795,7 @@ try:
     assert value["policy"]["batteryTimeoutSec"] == 900, value
     wait_for(lambda s: "config-unknown-keys: batterytimeoutSec" in (base / "runtime.log").read_text())
     print(
-        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, disabled timeouts"
+        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
     )
     # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
     process.stop()
