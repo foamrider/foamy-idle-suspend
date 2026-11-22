@@ -138,10 +138,11 @@ function parseActionSupport(text) {
 
 // A command's error output as status (lastError) and notifications show it:
 // the first line, at most 200 characters, ending in "…" when cut. Counted in
-// code points, so a cut never splits a character.
+// code points, so a cut never splits a character. Spread, not Array.from:
+// Quickshell's engine gives UTF-16 units for Array.from(string).
 function errorLine(text) {
   var line = String(text || "").trim().split("\n")[0].trim()
-  var chars = Array.from(line)
+  var chars = [...line]
   return chars.length > 200 ? chars.slice(0, 199).join("") + "…" : line
 }
 

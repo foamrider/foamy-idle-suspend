@@ -148,7 +148,8 @@ case $name in
   hostnamectl)
     [[ -e $home/hang-chassis ]] && exec sleep 30
     if [[ -e $home/chassis-error ]]; then
-      printf 'x%.0s' {1..300} >&2
+      # 300 x U+1F634, two UTF-16 units each: the cut must keep whole characters.
+      printf '\360\237\230\264%.0s' {1..300} >&2
       printf '\nsecond line\n' >&2
       exit 1
     fi
@@ -905,7 +906,7 @@ try:
     hostnamectl = bin_dir / "hostnamectl"
     for setup, expected in [
         (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
-        (lambda: (base / "chassis-error").touch(), "x" * 199 + "…"),
+        (lambda: (base / "chassis-error").touch(), "\U0001f634" * 199 + "…"),
         (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
         (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
         (hostnamectl.unlink, "hostnamectl chassis couldn't start"),
