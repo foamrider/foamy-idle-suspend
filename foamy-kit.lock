@@ -2,7 +2,7 @@
 # Hashes are of each file's body (the file without its stamp line);
 # notices and REVIEW.md are hashed whole. tests/kit-check.sh verifies them.
 version 0.13.1
-source b0c6407fe7a018ef9ed5042c0e15a7d398c6a522
+source f9a44b24e683873a48029faf32064b54e1338fea
 components FoamyI18n,FoamyIpc
 5079c3e4ecd2ca5399dff48f64327729d8e84916a4c73fbcb9e0491b16014990  .github/workflows/checks.yml
 23adc6c9c393c6f29eab5dcbabc13a27a38abdee1cf78c07efb69879dc28f6f7  .oxlintrc.json
