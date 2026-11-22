@@ -585,13 +585,16 @@ Item {
     }
   }
 
-  function chassisRead(exitCode, text, errorText) {
+  function chassisRead(exitCode, crashed, text, errorText) {
     root.chassis = String(text || "").trim() || "unknown"
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
     root.chassisLoaded = true
     if (exitCode !== 0) {
-      // timeout's own codes: 124/137 the deadline, 126/127 hostnamectl couldn't run.
-      if (exitCode === 124 || exitCode === 137)
+      // timeout's own codes: 124 the deadline, 126/127 hostnamectl couldn't
+      // run. A hostnamectl that ignores SIGTERM gets --kill-after's SIGKILL,
+      // which timeout sends to its whole process group, itself included: that
+      // deadline ends as a crash by signal 9, never as code 137.
+      if (exitCode === 124 || (crashed && exitCode === 9))
         root.processError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
       else if (exitCode === 126 || exitCode === 127)
         root.processError = "hostnamectl chassis couldn't start"
@@ -617,7 +620,7 @@ Item {
     }
     onExited: function (exitCode, exitStatus) {
       chassisProbe.exitSeen = true
-      root.chassisRead(exitCode, chassisOutput.text, chassisError.text)
+      root.chassisRead(exitCode, exitStatus !== 0, chassisOutput.text, chassisError.text)
     }
     // Not running without an exit: `timeout` couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
@@ -625,7 +628,7 @@ Item {
       if (running || exitSeen)
         return
       exitSeen = true
-      root.chassisRead(-1, "", "hostnamectl chassis couldn't start")
+      root.chassisRead(-1, false, "", "hostnamectl chassis couldn't start")
     }
   }
 

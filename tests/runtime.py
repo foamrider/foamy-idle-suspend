@@ -146,7 +146,12 @@ json() {
 read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
 case $name in
   hostnamectl)
-    [[ -e $home/hang-chassis ]] && exec sleep 30
+    if [[ -e $home/hang-chassis ]]; then
+      echo $$ > "$home/chassis-pid"
+      # One that ignores SIGTERM is stopped only by timeout's --kill-after.
+      [[ $(< "$home/hang-chassis") == stubborn ]] && trap '' TERM
+      exec sleep 30
+    fi
     if [[ -e $home/chassis-error ]]; then
       # 300 x U+1F634, two UTF-16 units each: the cut must keep whole characters.
       printf '\360\237\230\264%.0s' {1..300} >&2
@@ -901,11 +906,23 @@ try:
     # The chassis probe runs once per start. One that hangs, fails, can't run
     # hostnamectl or can't start at all leaves the chassis unknown (not a
     # laptop) and says why; a laptops-only policy stays off. Of a failure's
-    # error output, status shows the first line, cut at 200 characters.
+    # error output, status shows the first line, cut at 200 characters. A
+    # hung hostnamectl is stopped at the deadline, also one that ignores
+    # SIGTERM: it doesn't outlive the probe.
     write_config()
     hostnamectl = bin_dir / "hostnamectl"
+    chassis_pid = base / "chassis-pid"
+
+    def ended(pid):
+        # A zombie has ended; only its new parent hasn't reaped it yet.
+        try:
+            return pathlib.Path("/proc/%s/stat" % pid).read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        except FileNotFoundError:
+            return True
+
     for setup, expected in [
         (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "hang-chassis").write_text("stubborn"), "hostnamectl chassis didn't finish within 2 seconds"),
         (lambda: (base / "chassis-error").touch(), "\U0001f634" * 199 + "…"),
         (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
         (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
@@ -914,6 +931,7 @@ try:
         process.stop()
         (base / "hang-chassis").unlink(missing_ok=True)
         (base / "chassis-error").unlink(missing_ok=True)
+        chassis_pid.unlink(missing_ok=True)
         hostnamectl.chmod(0o755)
         chassis_timeout.chmod(0o755)
         setup()
@@ -921,8 +939,11 @@ try:
         value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
         assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
         assert value["lastError"] == expected, value
+        if (base / "hang-chassis").exists():
+            pid = chassis_pid.read_text().strip()
+            assert harness.wait_for(lambda pid=pid: ended(pid), 5), "hostnamectl %s still runs" % pid
     print(
-        "PASS: a chassis probe that hangs, fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off"
+        "PASS: a chassis probe that hangs (also ignoring SIGTERM), fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)
