@@ -147,6 +147,11 @@ read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s'
 case $name in
   hostnamectl)
     [[ -e $home/hang-chassis ]] && exec sleep 30
+    if [[ -e $home/chassis-error ]]; then
+      printf 'x%.0s' {1..300} >&2
+      printf '\nsecond line\n' >&2
+      exit 1
+    fi
     echo laptop ;;
   omarchy)
     [[ -e $home/hang-state ]] && sleep 30
@@ -192,7 +197,10 @@ case $name in
     sleep 0.1
     # The next attempt must lock again.
     rm -f "$home/locked" "$home/lock-requested"
-    if [[ -e $home/fail-sleep ]]; then echo 'mock sleep unavailable.' >&2; exit 1; fi ;;
+    if [[ -e $home/fail-sleep ]]; then
+      printf 'mock sleep unavailable.\nPlease retry operation after closing inhibitors.\n' >&2
+      exit 1
+    fi ;;
   *) json "$@" ;;
 esac
 """
@@ -675,6 +683,9 @@ try:
     value = wait_for(lambda s: s["failureStreak"] >= 2 and s["retryScheduled"])
     assert backoff_ok(value), value
     assert notes().count("Automatic sleep failed") == 1
+    # Only the first line of systemctl's error reaches status and the notification.
+    bodies = [line[-1] for line in recorded("notify-send") if line[-2] == "Automatic sleep failed"]
+    assert bodies == ["mock sleep unavailable. It tries again while the computer stays idle."], bodies
     assert sleep_calls()[-1] == ["systemctl", "suspend"]
     # Input resets the streak and stops the retry. The input call returns the
     # status from right before the input: it proves something only when no
@@ -698,7 +709,7 @@ try:
     active(False)
     (base / "fail-sleep").unlink()
     print(
-        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off; input resets the failure streak and stops the retry"
+        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
     )
 
     # A sleep request that never ends: the watchdog stops it and reports it
@@ -886,19 +897,22 @@ try:
     print(
         "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
     )
-    # The chassis probe runs once per start. One that hangs, can't run
+    # The chassis probe runs once per start. One that hangs, fails, can't run
     # hostnamectl or can't start at all leaves the chassis unknown (not a
-    # laptop) and says why; a laptops-only policy stays off.
+    # laptop) and says why; a laptops-only policy stays off. Of a failure's
+    # error output, status shows the first line, cut at 200 characters.
     write_config()
     hostnamectl = bin_dir / "hostnamectl"
     for setup, expected in [
         (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "chassis-error").touch(), "x" * 199 + "…"),
         (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
         (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
         (hostnamectl.unlink, "hostnamectl chassis couldn't start"),
     ]:
         process.stop()
         (base / "hang-chassis").unlink(missing_ok=True)
+        (base / "chassis-error").unlink(missing_ok=True)
         hostnamectl.chmod(0o755)
         chassis_timeout.chmod(0o755)
         setup()
@@ -907,7 +921,7 @@ try:
         assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
         assert value["lastError"] == expected, value
     print(
-        "PASS: a chassis probe that hangs, cannot run hostnamectl or cannot start is reported and keeps a laptops-only policy off"
+        "PASS: a chassis probe that hangs, fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)

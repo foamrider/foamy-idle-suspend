@@ -270,7 +270,7 @@ Item {
   function afterSuspend(exitCode, errorText) {
     if (exitCode !== 0) {
       root.failureStreak += 1
-      root.processError = String(errorText || "systemctl " + root.effectiveAction + " failed").trim()
+      root.processError = Policy.errorLine(errorText) || "systemctl " + root.effectiveAction + " failed"
       finishAttempt("suspend-error", root.processError)
       notifyOnce("suspend-failed", FoamyI18n.t("Automatic sleep failed"), FoamyI18n.t("%1. It tries again while the computer stays idle.", root.processError.replace(/[.\s]+$/, "")))
       // The action may have stopped being available (swap removed, …).
@@ -596,7 +596,7 @@ Item {
       else if (exitCode === 126 || exitCode === 127)
         root.processError = "hostnamectl chassis couldn't start"
       else
-        root.processError = String(errorText || "hostnamectl chassis failed").trim()
+        root.processError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
       root.logEvent("chassis-error", root.processError)
     } else {
       root.logEvent("chassis-ready", root.chassis)

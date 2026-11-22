@@ -210,7 +210,21 @@ test('BlockInhibited is read from busctl output; a failed or unreadable check is
   assert.deepEqual(Policy.readBlockInhibited(-1, '', "busctl couldn't start"), { ok: false, value: '', error: "busctl couldn't start" });
   for (const code of [124, 137])
     assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
-  assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error.length, 200);
+  assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error, 'x'.repeat(199) + '…');
+});
+
+test('command error output is cut to its first line and 200 characters, marked when cut', () => {
+  for (const [text, line] of [
+    [undefined, ''],
+    [' \n\n ', ''],
+    ['  Call to Suspend failed: Access denied\n', 'Call to Suspend failed: Access denied'],
+    ['Operation inhibited by "backup".\nPlease retry operation after closing inhibitors.\n', 'Operation inhibited by "backup".'],
+    ['x'.repeat(200) + '\nsecond line', 'x'.repeat(200)],
+    ['x'.repeat(201), 'x'.repeat(199) + '…'],
+    // Code points, not UTF-16 units: the cut never leaves half a character.
+    ['😴'.repeat(300), '😴'.repeat(199) + '…'],
+  ])
+    assert.equal(Policy.errorLine(text), line, JSON.stringify(text));
 });
 
 test('the manifest id is the entry parseConfig reads, and the service stays loaded', () => {

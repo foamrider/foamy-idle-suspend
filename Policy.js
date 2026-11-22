@@ -136,6 +136,15 @@ function parseActionSupport(text) {
   return answers
 }
 
+// A command's error output as status (lastError) and notifications show it:
+// the first line, at most 200 characters, ending in "…" when cut. Counted in
+// code points, so a cut never splits a character.
+function errorLine(text) {
+  var line = String(text || "").trim().split("\n")[0].trim()
+  var chars = Array.from(line)
+  return chars.length > 200 ? chars.slice(0, 199).join("") + "…" : line
+}
+
 // The inhibitor probe's result: logind's BlockInhibited property as busctl
 // --json=short prints it ({ ok: true, value: "idle:sleep" }, see
 // blockedByInhibitor), or { ok: false, error } when busctl failed, timed out
@@ -144,7 +153,7 @@ function parseActionSupport(text) {
 function readBlockInhibited(exitCode, text, errorText) {
   if (exitCode === 124 || exitCode === 137) return { ok: false, value: "", error: "no answer within 3 seconds" }
   if (exitCode !== 0) {
-    var detail = String(errorText || "").trim().split("\n")[0].slice(0, 200)
+    var detail = errorLine(errorText)
     return { ok: false, value: "", error: detail || "busctl exited " + exitCode }
   }
   var reply = null
@@ -196,5 +205,6 @@ if (typeof module !== "undefined") module.exports = {
   sameConfiguration: sameConfiguration, parsesAsJson: parsesAsJson, mediaPlaying: mediaPlaying,
   blockedByInhibitor: blockedByInhibitor, chooseAction: chooseAction, retryDelayMs: retryDelayMs,
   sleptDuring: sleptDuring, parseActionSupport: parseActionSupport, readBlockInhibited: readBlockInhibited,
+  errorLine: errorLine,
   ACTIONS: ACTIONS, CHOICES: CHOICES, CAN_METHODS: CAN_METHODS
 }
