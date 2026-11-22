@@ -724,6 +724,19 @@ try:
     ipc("test", "state", True, True, False)
     wait_for(lambda s: sleep_calls()[-1] == ["systemctl", "suspend"])
     active()
+    # A new suspendAction gets its own notice: set to suspend and back, it
+    # says so again. Once: the action probe that follows the change answers
+    # after config-ready, and its answer must not say it a second time.
+    write_config(suspendAction="suspend")
+    wait_for(lambda s: s["policy"]["suspendAction"] == "suspend" and not s["actionFallback"])
+    start = len(log_text())
+    write_config(suspendAction="suspend-then-hibernate")
+    assert harness.wait_for(
+        lambda: " actions: " in log_text()[start:].partition(" config-ready")[2], 30, stop=stopped
+    ), "no action probe answered after suspendAction changed"
+    fallbacks = log_text()[start:].count(" action-fallback: ")
+    assert fallbacks == 1, "suspendAction set away and back gave %d fallback notices, not 1" % fallbacks
+    wait_for(lambda s: notes().count("suspend-then-hibernate isn't available") == 2)
     # A failed request is reported once and retried with backoff.
     (base / "fail-sleep").touch()
     write_config(acTimeoutSec=1800, suspendAction="suspend")
@@ -765,7 +778,7 @@ try:
     active(False)
     (base / "fail-sleep").unlink()
     print(
-        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
+        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification, once more after suspendAction is set away and back; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
     )
 
     # A sleep request that never ends: the watchdog stops it and reports it

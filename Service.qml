@@ -86,6 +86,8 @@ Item {
   // "Sleep isn't available" describes the machine, not one idle period:
   // shown once per configuration (see applyConfiguration).
   property bool unavailableNotified: false
+  // The suspendAction whose fallback notice was shown; a new suspendAction
+  // gets its own (see applyConfiguration).
   property string fallbackNotified: ""
   readonly property int retryBaseMs: 60000
   // How long systemctl may take to hand the sleep request to logind; it
@@ -462,6 +464,10 @@ Item {
     if (Policy.sameConfiguration(root.configuration, next))
       return
     var actionChanged = next.settings.suspendAction !== root.policy.suspendAction
+    // Before the new configuration applies: applying it can show the new
+    // setting's fallback notice at once.
+    if (actionChanged)
+      root.fallbackNotified = ""
     root.configuration = next
     root.unavailableNotified = false
     root.logEvent(next.valid ? "config-ready" : "config-error", next.error)

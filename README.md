@@ -101,7 +101,7 @@ This plugin does not configure swap, hibernation support, or systemd's
 hibernation delay. Before every sleep it asks logind which actions are available.
 An explicitly chosen action the machine cannot run (for example
 `suspend-then-hibernate` without `omarchy-hibernation-setup`) falls back to
-`suspend` with a notification, once. `"auto"` never notifies: it simply uses what
+`suspend` with a notification, once until `suspendAction` changes. `"auto"` never notifies: it simply uses what
 the machine supports. Status reports `effectiveAction` (the action the next sleep
 uses), `autoAction` (what `"auto"` resolved to, or `null` for an explicit
 action), `actionFallback` and `actionSupport`. Configurations that set
