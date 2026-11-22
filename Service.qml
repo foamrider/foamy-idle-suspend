@@ -53,7 +53,12 @@ Item {
   property string stayAwakeError: ""
   // The last logind inhibitor check that failed; cleared by the next good one.
   property string inhibitorError: ""
-  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || processError
+  // Why the chassis check failed; it runs once per shell start.
+  property string chassisCheckError: ""
+  // A failed chassis check keeps a laptops-only policy off: no attempt runs,
+  // so an attempt's error is older. With laptopsOnly false it keeps nothing
+  // off, and the last attempt's error comes first.
+  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || (policy.laptopsOnly ? chassisCheckError || processError : processError || chassisCheckError)
   property bool stayAwakeStateKnown: false
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
@@ -601,12 +606,12 @@ Item {
     if (exitCode !== 0) {
       // 126/127 are timeout's own codes: hostnamectl couldn't run.
       if (timedOut)
-        root.processError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
+        root.chassisCheckError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
       else if (exitCode === 126 || exitCode === 127)
-        root.processError = "hostnamectl chassis couldn't start"
+        root.chassisCheckError = "hostnamectl chassis couldn't start"
       else
-        root.processError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
-      root.logEvent("chassis-error", root.processError)
+        root.chassisCheckError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
+      root.logEvent("chassis-error", root.chassisCheckError)
     } else {
       root.logEvent("chassis-ready", root.chassis)
     }

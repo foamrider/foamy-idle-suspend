@@ -977,6 +977,29 @@ try:
     print(
         "PASS: a chassis probe that hangs (also ignoring SIGTERM), is killed before its deadline, fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
     )
+    # The failed chassis check (hostnamectl is gone) has its own place in
+    # lastError: a sleep attempt, which laptopsOnly false allows, doesn't
+    # erase it. While it keeps a laptops-only policy off it comes first;
+    # otherwise the newer error of the last attempt does.
+    write_config(laptopsOnly=False)
+    wait_for(lambda s: s["enabled"] and s["lastError"] == "hostnamectl chassis couldn't start")
+    (base / "fail-sleep").touch()
+    ipc("test", "state", True, True, False)
+    wait_for(
+        lambda s: s["lastError"] == "mock sleep unavailable." and s["phase"] == "idle",
+        message="the failed attempt's error is hidden behind a chassis error that keeps nothing off",
+    )
+    write_config()
+    value = wait_for(lambda s: s["policy"]["laptopsOnly"] and not s["enabled"])
+    assert value["lastError"] == "hostnamectl chassis couldn't start", (
+        "a laptops-only policy is off, but lastError doesn't say why",
+        value,
+    )
+    ipc("test", "state", True, False, False)
+    (base / "fail-sleep").unlink()
+    print(
+        "PASS: a failed chassis check stays in lastError after a sleep attempt, first while it keeps a laptops-only policy off"
+    )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)
     # A script error in a handler would leave an attempt stuck mid-phase.
