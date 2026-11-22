@@ -28,11 +28,18 @@ Item {
   // Deadline for `omarchy toggle idle status` (it normally answers in tens
   // of milliseconds); a hung read would otherwise keep sleep off silently.
   readonly property int stayAwakeTimeoutSec: 5
-  // Deadline for `hostnamectl chassis`, which runs once per shell start.
+  // Deadline for each `hostnamectl chassis` check (see checkChassis).
   // Longer than hostnamectl's own 25 s D-Bus call timeout, so a slow
   // systemd-hostnamed at login still answers; it stops only a probe that
   // would never end and keep a laptops-only policy off without a reason.
   readonly property int chassisTimeoutSec: 30
+  // A failed chassis check keeps a laptops-only policy off, and
+  // systemd-hostnamed can be slow or not up yet at login. So the check runs
+  // again 1 minute after the first failure, 5 minutes after the second and
+  // 15 minutes after the third; after the fourth, not until the shell
+  // restarts. A check that answers ends the retries.
+  readonly property var chassisRetryDelaysMs: [60000, 300000, 900000]
+  property int chassisRetries: 0
   // Deadline for the logind inhibitor check; busctl normally answers at once.
   readonly property int inhibitorTimeoutSec: 3
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
@@ -53,7 +60,7 @@ Item {
   property string stayAwakeError: ""
   // The last logind inhibitor check that failed; cleared by the next good one.
   property string inhibitorError: ""
-  // Why the chassis check failed; it runs once per shell start.
+  // Why the last chassis check failed; empty once a check answers.
   property string chassisCheckError: ""
   // A failed chassis check keeps a laptops-only policy off: no attempt runs,
   // so an attempt's error is older. With laptopsOnly false it keeps nothing
@@ -599,6 +606,13 @@ Item {
     }
   }
 
+  // Reset before the start: a start that fails never reports running.
+  function checkChassis() {
+    chassisProbe.exitSeen = false
+    chassisProbe.startedAt = Date.now()
+    chassisProbe.running = true
+  }
+
   function chassisRead(exitCode, timedOut, text, errorText) {
     root.chassis = String(text || "").trim() || "unknown"
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
@@ -612,7 +626,13 @@ Item {
       else
         root.chassisCheckError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
       root.logEvent("chassis-error", root.chassisCheckError)
+      if (root.chassisRetries < root.chassisRetryDelaysMs.length) {
+        root.chassisRetryTimer.interval = root.chassisRetryDelaysMs[root.chassisRetries]
+        root.chassisRetries += 1
+        root.chassisRetryTimer.restart()
+      }
     } else {
+      root.chassisCheckError = ""
       root.logEvent("chassis-ready", root.chassis)
     }
   }
@@ -642,6 +662,13 @@ Item {
       exitSeen = true
       root.chassisRead(-1, false, "", "hostnamectl chassis couldn't start")
     }
+  }
+
+  // A property, so the runtime test can see when the next check is due and
+  // run it at once instead of waiting minutes.
+  property Timer chassisRetryTimer: Timer {
+    repeat: false
+    onTriggered: root.checkChassis()
   }
 
   // Which sleep actions logind can run. Hibernation needs setup that stock
@@ -772,8 +799,7 @@ Item {
 
   Component.onCompleted: {
     logEvent("service-ready")
-    chassisProbe.startedAt = Date.now()
-    chassisProbe.running = true
+    checkChassis()
     probeActions()
     refreshStayAwakeState()
   }
