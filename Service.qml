@@ -33,6 +33,8 @@ Item {
   // systemd-hostnamed at login still answers; it stops only a probe that
   // would never end and keep a laptops-only policy off without a reason.
   readonly property int chassisTimeoutSec: 30
+  // Deadline for the logind inhibitor check; busctl normally answers at once.
+  readonly property int inhibitorTimeoutSec: 3
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -173,12 +175,17 @@ Item {
   // never report running, so exitSeen can't be reset from runningChanged.
   function checkInhibitors() {
     inhibitorProbe.exitSeen = false
+    inhibitorProbe.startedAt = Date.now()
     inhibitorProbe.running = true
   }
 
-  function afterInhibitorCheck(exitCode, text, errorText) {
+  function afterInhibitorCheck(exitCode, timedOut, text, errorText) {
     var source = root.attemptSource
-    var check = Policy.readBlockInhibited(exitCode, text, errorText)
+    var check = timedOut ? {
+      ok: false,
+      value: "",
+      error: "no answer within " + root.inhibitorTimeoutSec + " seconds"
+    } : Policy.readBlockInhibited(exitCode, text, errorText)
     root.blockInhibited = check.value
     root.inhibitorError = check.ok ? "" : "Couldn't check logind inhibitors: " + check.error
     if (!stillIdle(source))
@@ -521,6 +528,7 @@ Item {
     // Do not act on stale Stay awake state while a refresh is in flight.
     root.stayAwakeStateKnown = false
     stayAwakeProbe.exitSeen = false
+    stayAwakeProbe.startedAt = Date.now()
     stayAwakeProbe.running = true
   }
 
@@ -542,15 +550,16 @@ Item {
   Process {
     id: stayAwakeProbe
     property bool exitSeen: false
+    property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.stayAwakeTimeoutSec + "s", "omarchy", "toggle", "idle", "status"]
     stdout: StdioCollector {
       id: awakeOutput
       waitForEnd: true
     }
-    onExited: function (exitCode) {
+    onExited: function (exitCode, exitStatus) {
       stayAwakeProbe.exitSeen = true
-      // timeout's own codes: 124/137 the deadline, 126/127 omarchy couldn't run.
-      if (exitCode === 124 || exitCode === 137) {
+      // 126/127 are timeout's own codes: omarchy couldn't run.
+      if (Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - stayAwakeProbe.startedAt, root.stayAwakeTimeoutSec * 1000)) {
         root.stayAwakeFailed("omarchy toggle idle status didn't finish within " + root.stayAwakeTimeoutSec + " seconds")
       } else if (exitCode === 126 || exitCode === 127) {
         root.stayAwakeFailed("omarchy toggle idle status couldn't start")
@@ -662,7 +671,8 @@ Item {
   Process {
     id: inhibitorProbe
     property bool exitSeen: false
-    command: ["timeout", "--kill-after=1s", "3s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
+    property double startedAt: 0
+    command: ["timeout", "--kill-after=1s", root.inhibitorTimeoutSec + "s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
     stdout: StdioCollector {
       id: inhibitorOutput
       waitForEnd: true
@@ -676,11 +686,11 @@ Item {
       if (running || exitSeen)
         return
       exitSeen = true
-      root.afterInhibitorCheck(-1, "", "busctl couldn't start")
+      root.afterInhibitorCheck(-1, false, "", "busctl couldn't start")
     }
-    onExited: function (exitCode) {
+    onExited: function (exitCode, exitStatus) {
       inhibitorProbe.exitSeen = true
-      root.afterInhibitorCheck(exitCode, inhibitorOutput.text, inhibitorErrorOutput.text)
+      root.afterInhibitorCheck(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - inhibitorProbe.startedAt, root.inhibitorTimeoutSec * 1000), inhibitorOutput.text, inhibitorErrorOutput.text)
     }
   }
 

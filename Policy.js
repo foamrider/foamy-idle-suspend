@@ -160,11 +160,11 @@ function stoppedAtDeadline(exitCode, crashed, elapsedMs, limitMs) {
 
 // The inhibitor probe's result: logind's BlockInhibited property as busctl
 // --json=short prints it ({ ok: true, value: "idle:sleep" }, see
-// blockedByInhibitor), or { ok: false, error } when busctl failed, timed out
-// or printed something else. A failed check is no answer: it never reads as
-// "no inhibitor", which would let the computer sleep through one.
+// blockedByInhibitor), or { ok: false, error } when busctl failed or printed
+// something else; a check stopped at its deadline is the caller's (see
+// stoppedAtDeadline). A failed check is no answer: it never reads as "no
+// inhibitor", which would let the computer sleep through one.
 function readBlockInhibited(exitCode, text, errorText) {
-  if (exitCode === 124 || exitCode === 137) return { ok: false, value: "", error: "no answer within 3 seconds" }
   if (exitCode !== 0) {
     var detail = errorLine(errorText)
     return { ok: false, value: "", error: detail || "busctl exited " + exitCode }

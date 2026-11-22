@@ -208,8 +208,6 @@ test('BlockInhibited is read from busctl output; a failed or unreadable check is
     { ok: false, value: '', error: 'Failed to get property' });
   assert.deepEqual(Policy.readBlockInhibited(1, reply, ''), { ok: false, value: '', error: 'busctl exited 1' });
   assert.deepEqual(Policy.readBlockInhibited(-1, '', "busctl couldn't start"), { ok: false, value: '', error: "busctl couldn't start" });
-  for (const code of [124, 137])
-    assert.deepEqual(Policy.readBlockInhibited(code, ''), { ok: false, value: '', error: 'no answer within 3 seconds' });
   assert.equal(Policy.readBlockInhibited(1, reply, 'x'.repeat(500)).error, 'x'.repeat(199) + '…');
 });
 
