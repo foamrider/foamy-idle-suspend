@@ -47,6 +47,7 @@ for old, new in [
     ("readonly property int retryBaseMs: 60000", "readonly property int retryBaseMs: 700"),
     ("readonly property int suspendWatchdogMs: 60000", "readonly property int suspendWatchdogMs: 4000"),
     ("readonly property int stayAwakeTimeoutSec: 5", "readonly property int stayAwakeTimeoutSec: 2"),
+    ("readonly property int chassisTimeoutSec: 30", "readonly property int chassisTimeoutSec: 2"),
     ("readonly property int configRereadMs: 250", "readonly property int configRereadMs: 3000"),
 ]:
     assert old in service, old
@@ -57,12 +58,17 @@ for old, new in [
 for old, new, places in [
     ('["systemctl", ', '["%s/systemctl", ' % bin_dir, 1),
     ('"omarchy", "toggle", "idle", "status"]', '"%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
-    ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
+    ('"hostnamectl", "chassis"]', '"%s/hostnamectl", "chassis"]' % bin_dir, 1),
     ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
     ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
     # The probes' and the lock's own `timeout`, so the test can make each one
     # unstartable.
     ('["timeout", "--kill-after=1s", "3s", ', '["%s/inhibit-timeout", "--kill-after=1s", "3s", ' % bin_dir, 1),
+    (
+        '["timeout", "--kill-after=1s", root.chassisTimeoutSec',
+        '["%s/chassis-timeout", "--kill-after=1s", root.chassisTimeoutSec' % bin_dir,
+        1,
+    ),
     (
         '["timeout", "--kill-after=1s", "5s", "bash"',
         '["%s/probe-timeout", "--kill-after=1s", "5s", "bash"' % bin_dir,
@@ -139,7 +145,20 @@ json() {
 }
 read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
 case $name in
-  hostnamectl) echo laptop ;;
+  hostnamectl)
+    if [[ -e $home/hang-chassis ]]; then
+      echo $$ > "$home/chassis-pid"
+      # One that ignores SIGTERM is stopped only by timeout's --kill-after.
+      [[ $(< "$home/hang-chassis") == stubborn ]] && trap '' TERM
+      exec sleep 30
+    fi
+    if [[ -e $home/chassis-error ]]; then
+      # 300 x U+1F634, two UTF-16 units each: the cut must keep whole characters.
+      printf '\360\237\230\264%.0s' {1..300} >&2
+      printf '\nsecond line\n' >&2
+      exit 1
+    fi
+    echo laptop ;;
   omarchy)
     [[ -e $home/hang-state ]] && sleep 30
     if [[ -e $home/bad-state ]]; then answer='invalid state'
@@ -184,7 +203,10 @@ case $name in
     sleep 0.1
     # The next attempt must lock again.
     rm -f "$home/locked" "$home/lock-requested"
-    if [[ -e $home/fail-sleep ]]; then echo 'mock sleep unavailable.' >&2; exit 1; fi ;;
+    if [[ -e $home/fail-sleep ]]; then
+      printf 'mock sleep unavailable.\nPlease retry operation after closing inhibitors.\n' >&2
+      exit 1
+    fi ;;
   *) json "$@" ;;
 esac
 """
@@ -192,10 +214,10 @@ for name in ["hostnamectl", "omarchy", "systemctl", "notify-send", "busctl", "om
     file = bin_dir / name
     file.write_text(command)
     file.chmod(0o755)
-inhibit_timeout, probe_timeout, lock_timeout = (
-    bin_dir / n for n in ("inhibit-timeout", "probe-timeout", "lock-timeout")
+inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout = (
+    bin_dir / n for n in ("inhibit-timeout", "probe-timeout", "lock-timeout", "chassis-timeout")
 )
-for wrapper in (inhibit_timeout, probe_timeout, lock_timeout):
+for wrapper in (inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout):
     wrapper.write_text('#!/bin/bash\nexec timeout "$@"\n')
     wrapper.chmod(0o755)
 # This machine (and most stock installs) cannot hibernate.
@@ -667,6 +689,9 @@ try:
     value = wait_for(lambda s: s["failureStreak"] >= 2 and s["retryScheduled"])
     assert backoff_ok(value), value
     assert notes().count("Automatic sleep failed") == 1
+    # Only the first line of systemctl's error reaches status and the notification.
+    bodies = [line[-1] for line in recorded("notify-send") if line[-2] == "Automatic sleep failed"]
+    assert bodies == ["mock sleep unavailable. It tries again while the computer stays idle."], bodies
     assert sleep_calls()[-1] == ["systemctl", "suspend"]
     # Input resets the streak and stops the retry. The input call returns the
     # status from right before the input: it proves something only when no
@@ -690,7 +715,7 @@ try:
     active(False)
     (base / "fail-sleep").unlink()
     print(
-        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once and backs off; input resets the failure streak and stops the retry"
+        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
     )
 
     # A sleep request that never ends: the watchdog stops it and reports it
@@ -878,15 +903,48 @@ try:
     print(
         "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
     )
-    # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
-    process.stop()
+    # The chassis probe runs once per start. One that hangs, fails, can't run
+    # hostnamectl or can't start at all leaves the chassis unknown (not a
+    # laptop) and says why; a laptops-only policy stays off. Of a failure's
+    # error output, status shows the first line, cut at 200 characters. A
+    # hung hostnamectl is stopped at the deadline, also one that ignores
+    # SIGTERM: it doesn't outlive the probe.
     write_config()
-    (bin_dir / "hostnamectl").unlink()
-    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
-    value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
-    assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
-    assert value["lastError"] == "hostnamectl chassis couldn't start", value
-    print("PASS: a chassis probe that cannot start is reported and keeps a laptops-only policy off")
+    hostnamectl = bin_dir / "hostnamectl"
+    chassis_pid = base / "chassis-pid"
+
+    def ended(pid):
+        # A zombie has ended; only its new parent hasn't reaped it yet.
+        try:
+            return pathlib.Path("/proc/%s/stat" % pid).read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        except FileNotFoundError:
+            return True
+
+    for setup, expected in [
+        (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "hang-chassis").write_text("stubborn"), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "chassis-error").touch(), "\U0001f634" * 199 + "…"),
+        (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
+        (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
+        (hostnamectl.unlink, "hostnamectl chassis couldn't start"),
+    ]:
+        process.stop()
+        (base / "hang-chassis").unlink(missing_ok=True)
+        (base / "chassis-error").unlink(missing_ok=True)
+        chassis_pid.unlink(missing_ok=True)
+        hostnamectl.chmod(0o755)
+        chassis_timeout.chmod(0o755)
+        setup()
+        process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+        value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
+        assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
+        assert value["lastError"] == expected, value
+        if (base / "hang-chassis").exists():
+            pid = chassis_pid.read_text().strip()
+            assert harness.wait_for(lambda pid=pid: ended(pid), 5), "hostnamectl %s still runs" % pid
+    print(
+        "PASS: a chassis probe that hangs (also ignoring SIGTERM), fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
+    )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)
     # A script error in a handler would leave an attempt stuck mid-phase.

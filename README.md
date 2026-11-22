@@ -42,7 +42,7 @@ containing only `"id": "foamy.idle-suspend"` has the same behavior.
 | --- | --- | --- |
 | `batteryTimeoutSec` | `900` | Idle seconds before sleeping while UPower reports battery power. |
 | `acTimeoutSec` | `null` | Idle seconds before sleeping while UPower reports AC power. |
-| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. Set `false` to allow desktops and other chassis types. |
+| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. It is asked once when the shell starts; if it fails, can't start or gives no answer within 30 seconds, the computer counts as not a laptop and status shows why in `lastError`. Set `false` to allow desktops and other chassis types. |
 | `suspendAction` | `"auto"` | The systemd sleep action to run when the active timeout expires. `"auto"` picks one on each attempt (see below). |
 | `pauseForMedia` | `true` | Wait while any MPRIS player (music, video, podcast, browser tab) is playing. Paused players do not count. |
 | `lockBeforeSuspend` | `true` | Lock the screen and wait until the lock reports it is secure before sleeping. If it cannot lock, it does not sleep. |
