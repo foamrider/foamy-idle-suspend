@@ -1,13 +1,13 @@
 # foamy-kit.lock: written by foamy-kit sync.sh; do not edit.
 # Hashes are of each file's body (the file without its stamp line);
 # notices and REVIEW.md are hashed whole. tests/kit-check.sh verifies them.
-version 0.9.0
-source cd8e0d7bd48e3040640fe22807e7823c15978392
+version 0.13.1
+source 5e76237919e2fe10e9f0acfcae70eed33a36b490
 components FoamyI18n,FoamyIpc
 5079c3e4ecd2ca5399dff48f64327729d8e84916a4c73fbcb9e0491b16014990  .github/workflows/checks.yml
 23adc6c9c393c6f29eab5dcbabc13a27a38abdee1cf78c07efb69879dc28f6f7  .oxlintrc.json
 771e7eeb95d50551c7a7a8038f0d033ad3385a63b90f6d767133f5f15b872d5a  .qmlformat.ini
-f486b8b76dc0d143efdf29b506e3cf39c67a797e37cd0fcf6f269fb95e95bae0  REVIEW.md
+b04f4e648e7bab0d42d83735e88a4250020233089d0b2fa5dd7264cbf2400bcc  REVIEW.md
 ef1cbd050ad9980e584bd165d7a6e3543cfb9da7de868e7a86f16159ff1ecd9d  kit/FoamyI18n.qml
 a541e98f164e6c2e83b493341e50b128ba539dc4f32cf2253fb688731a513c3c  kit/FoamyI18nText.js
 59287c6def66c4158c02d1569fd08656ef9684f82ed324544c4141b79a086ace  kit/FoamyIpc.qml
@@ -15,8 +15,8 @@ a541e98f164e6c2e83b493341e50b128ba539dc4f32cf2253fb688731a513c3c  kit/FoamyI18nT
 72e0502f9cd35ca638b6af1c5e3e5411738a161cff2ed18f5751e11e9365f48c  kit/FoamyIpcResolver.js
 90b1a10f5f5005c94031f36fef0ad3d8e705cf4e13372dd8362ef4579e0a93df  kit/node-loader.cjs
 e15eb41e7ca505c37a4a401ea4da856b268585d7ef376c19573d59a153d5256e  kit/qmldir
-d5377f7e0337828bc9950e0e651403e128e8216bb4673b2ec173fde63f24be1b  kit/tooling/validate.py
+824921f5001a1e69101a6dd998f21bee83fe155c3d1ad82aa376aef6d6fbebb4  kit/tooling/validate.py
 4d8c9ad0403a76291a2c89eff71dcdd370281814bbb9055e9c7bf88961b7d6ac  mise.toml
 30062b8bc91b2af48aa4124370f8b9552b2077ad032173dbf5690de4526c7c0d  ruff.toml
-1fe704c34ceb0cc6cc9e3e6bc6e8a0e19d0508e479725049ac523714949319d9  tests/kit-check.sh
+e81c49df3c7766c89a7fb05c3b7d5d558638cb123e95237680999a290b1befa1  tests/kit-check.sh
 600483edb58f93da9e745500dac4efa7c5ef9fd23151a67fc2106ee1e07fbca9  tests/validate.sh
