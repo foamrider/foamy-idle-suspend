@@ -33,6 +33,8 @@ Item {
   // systemd-hostnamed at login still answers; it stops only a probe that
   // would never end and keep a laptops-only policy off without a reason.
   readonly property int chassisTimeoutSec: 30
+  // Deadline for the logind inhibitor check; busctl normally answers at once.
+  readonly property int inhibitorTimeoutSec: 3
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -51,7 +53,12 @@ Item {
   property string stayAwakeError: ""
   // The last logind inhibitor check that failed; cleared by the next good one.
   property string inhibitorError: ""
-  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || processError
+  // Why the chassis check failed; it runs once per shell start.
+  property string chassisCheckError: ""
+  // A failed chassis check keeps a laptops-only policy off: no attempt runs,
+  // so an attempt's error is older. With laptopsOnly false it keeps nothing
+  // off, and the last attempt's error comes first.
+  readonly property string lastError: configuration.error || stayAwakeError || inhibitorError || (policy.laptopsOnly ? chassisCheckError || processError : processError || chassisCheckError)
   property bool stayAwakeStateKnown: false
   property bool stayAwakeObserved: false
   property bool lastStayAwake: false
@@ -173,12 +180,17 @@ Item {
   // never report running, so exitSeen can't be reset from runningChanged.
   function checkInhibitors() {
     inhibitorProbe.exitSeen = false
+    inhibitorProbe.startedAt = Date.now()
     inhibitorProbe.running = true
   }
 
-  function afterInhibitorCheck(exitCode, text, errorText) {
+  function afterInhibitorCheck(exitCode, timedOut, text, errorText) {
     var source = root.attemptSource
-    var check = Policy.readBlockInhibited(exitCode, text, errorText)
+    var check = timedOut ? {
+      ok: false,
+      value: "",
+      error: "no answer within " + root.inhibitorTimeoutSec + " seconds"
+    } : Policy.readBlockInhibited(exitCode, text, errorText)
     root.blockInhibited = check.value
     root.inhibitorError = check.ok ? "" : "Couldn't check logind inhibitors: " + check.error
     if (!stillIdle(source))
@@ -521,6 +533,7 @@ Item {
     // Do not act on stale Stay awake state while a refresh is in flight.
     root.stayAwakeStateKnown = false
     stayAwakeProbe.exitSeen = false
+    stayAwakeProbe.startedAt = Date.now()
     stayAwakeProbe.running = true
   }
 
@@ -542,15 +555,16 @@ Item {
   Process {
     id: stayAwakeProbe
     property bool exitSeen: false
+    property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.stayAwakeTimeoutSec + "s", "omarchy", "toggle", "idle", "status"]
     stdout: StdioCollector {
       id: awakeOutput
       waitForEnd: true
     }
-    onExited: function (exitCode) {
+    onExited: function (exitCode, exitStatus) {
       stayAwakeProbe.exitSeen = true
-      // timeout's own codes: 124/137 the deadline, 126/127 omarchy couldn't run.
-      if (exitCode === 124 || exitCode === 137) {
+      // 126/127 are timeout's own codes: omarchy couldn't run.
+      if (Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - stayAwakeProbe.startedAt, root.stayAwakeTimeoutSec * 1000)) {
         root.stayAwakeFailed("omarchy toggle idle status didn't finish within " + root.stayAwakeTimeoutSec + " seconds")
       } else if (exitCode === 126 || exitCode === 127) {
         root.stayAwakeFailed("omarchy toggle idle status couldn't start")
@@ -585,22 +599,19 @@ Item {
     }
   }
 
-  function chassisRead(exitCode, crashed, text, errorText) {
+  function chassisRead(exitCode, timedOut, text, errorText) {
     root.chassis = String(text || "").trim() || "unknown"
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
     root.chassisLoaded = true
     if (exitCode !== 0) {
-      // timeout's own codes: 124 the deadline, 126/127 hostnamectl couldn't
-      // run. A hostnamectl that ignores SIGTERM gets --kill-after's SIGKILL,
-      // which timeout sends to its whole process group, itself included: that
-      // deadline ends as a crash by signal 9, never as code 137.
-      if (exitCode === 124 || (crashed && exitCode === 9))
-        root.processError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
+      // 126/127 are timeout's own codes: hostnamectl couldn't run.
+      if (timedOut)
+        root.chassisCheckError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
       else if (exitCode === 126 || exitCode === 127)
-        root.processError = "hostnamectl chassis couldn't start"
+        root.chassisCheckError = "hostnamectl chassis couldn't start"
       else
-        root.processError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
-      root.logEvent("chassis-error", root.processError)
+        root.chassisCheckError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
+      root.logEvent("chassis-error", root.chassisCheckError)
     } else {
       root.logEvent("chassis-ready", root.chassis)
     }
@@ -609,6 +620,7 @@ Item {
   Process {
     id: chassisProbe
     property bool exitSeen: false
+    property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.chassisTimeoutSec + "s", "hostnamectl", "chassis"]
     stdout: StdioCollector {
       id: chassisOutput
@@ -620,7 +632,7 @@ Item {
     }
     onExited: function (exitCode, exitStatus) {
       chassisProbe.exitSeen = true
-      root.chassisRead(exitCode, exitStatus !== 0, chassisOutput.text, chassisError.text)
+      root.chassisRead(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - chassisProbe.startedAt, root.chassisTimeoutSec * 1000), chassisOutput.text, chassisError.text)
     }
     // Not running without an exit: `timeout` couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
@@ -664,7 +676,8 @@ Item {
   Process {
     id: inhibitorProbe
     property bool exitSeen: false
-    command: ["timeout", "--kill-after=1s", "3s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
+    property double startedAt: 0
+    command: ["timeout", "--kill-after=1s", root.inhibitorTimeoutSec + "s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
     stdout: StdioCollector {
       id: inhibitorOutput
       waitForEnd: true
@@ -678,11 +691,11 @@ Item {
       if (running || exitSeen)
         return
       exitSeen = true
-      root.afterInhibitorCheck(-1, "", "busctl couldn't start")
+      root.afterInhibitorCheck(-1, false, "", "busctl couldn't start")
     }
-    onExited: function (exitCode) {
+    onExited: function (exitCode, exitStatus) {
       inhibitorProbe.exitSeen = true
-      root.afterInhibitorCheck(exitCode, inhibitorOutput.text, inhibitorErrorOutput.text)
+      root.afterInhibitorCheck(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - inhibitorProbe.startedAt, root.inhibitorTimeoutSec * 1000), inhibitorOutput.text, inhibitorErrorOutput.text)
     }
   }
 
@@ -759,6 +772,7 @@ Item {
 
   Component.onCompleted: {
     logEvent("service-ready")
+    chassisProbe.startedAt = Date.now()
     chassisProbe.running = true
     probeActions()
     refreshStayAwakeState()

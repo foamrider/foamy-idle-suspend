@@ -63,7 +63,11 @@ for old, new, places in [
     ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
     # The probes' and the lock's own `timeout`, so the test can make each one
     # unstartable.
-    ('["timeout", "--kill-after=1s", "3s", ', '["%s/inhibit-timeout", "--kill-after=1s", "3s", ' % bin_dir, 1),
+    (
+        '["timeout", "--kill-after=1s", root.inhibitorTimeoutSec',
+        '["%s/inhibit-timeout", "--kill-after=1s", root.inhibitorTimeoutSec' % bin_dir,
+        1,
+    ),
     (
         '["timeout", "--kill-after=1s", root.chassisTimeoutSec',
         '["%s/chassis-timeout", "--kill-after=1s", root.chassisTimeoutSec' % bin_dir,
@@ -146,6 +150,9 @@ json() {
 read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
 case $name in
   hostnamectl)
+    # Killed from elsewhere (the OOM killer) long before the deadline:
+    # timeout passes the SIGKILL on to itself.
+    [[ -e $home/chassis-killed ]] && kill -KILL $$
     if [[ -e $home/hang-chassis ]]; then
       echo $$ > "$home/chassis-pid"
       # One that ignores SIGTERM is stopped only by timeout's --kill-after.
@@ -160,7 +167,11 @@ case $name in
     fi
     echo laptop ;;
   omarchy)
-    [[ -e $home/hang-state ]] && sleep 30
+    if [[ -e $home/hang-state ]]; then
+      # One that ignores SIGTERM is stopped only by timeout's --kill-after.
+      [[ $(< "$home/hang-state") == stubborn ]] && trap '' TERM
+      sleep 30
+    fi
     if [[ -e $home/bad-state ]]; then answer='invalid state'
     elif [[ -e $home/.local/state/omarchy/indicators/stay-awake ]]; then answer='{"enabled": true}'
     else answer='{"enabled": false}'; fi
@@ -175,6 +186,11 @@ case $name in
     if [[ " $* " == *" get-property "* ]]; then
       if [[ -e $home/inhibitor-fail ]]; then
         echo 'Failed to get property BlockInhibited: Connection timed out' >&2; exit 1
+      fi
+      if [[ -e $home/inhibitor-hang ]]; then
+        # Ignores SIGTERM: only timeout's --kill-after stops it.
+        trap '' TERM
+        exec sleep 30
       fi
       if [[ -e $home/inhibitor-garbage ]]; then echo garbage
       else printf '{"type": "s", "data": "%s"}\n' "$(read_or block-inhibited '')"; fi
@@ -478,6 +494,17 @@ try:
     value = wait_for(lambda s: s["phase"] == "idle")
     assert value["lastError"] == "", value
     active()
+    # A check that ignores SIGTERM at its deadline ends by --kill-after's
+    # SIGKILL: that is no answer within the deadline too.
+    (base / "inhibitor-hang").touch()
+    count = len(sleep_calls())
+    ipc("test", "state", True, True, False)
+    value = wait_for(lambda s: s["deferredReason"] == "inhibitor-check-failed" and s["retryScheduled"])
+    assert value["lastError"] == "Couldn't check logind inhibitors: no answer within 3 seconds", value
+    assert len(sleep_calls()) == count, "slept although the inhibitor check got no answer"
+    (base / "inhibitor-hang").unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    active()
     # A check that can't start ends the attempt the same way, also after
     # checks that ran (no attempt is left at "checking").
     inhibit_timeout.chmod(0o644)
@@ -593,7 +620,7 @@ try:
     write_config()
     wait_for(lambda s: s["policy"]["pauseForMedia"] is True)
     print(
-        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check defers and retries; a repeated idle request while locking starts no second attempt; input while locking gives no sleep; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
+        "PASS: unrelated config writes and in-place rewrites keep the countdown, an unreadable file applies after the re-read, MPRIS playback and logind inhibitors defer sleep, also when they start during locking; a failed or unreadable inhibitor check, or one that hangs and ignores SIGTERM, defers and retries; a repeated idle request while locking starts no second attempt; input while locking gives no sleep; a power-source change mid-attempt and turning pauseForMedia off still lead to sleep"
     )
     # No secure lock, no sleep: notify once and retry while idle.
     (base / "lock-reply").write_text("missing-pam")
@@ -811,17 +838,18 @@ try:
     omarchy.chmod(0o755)
     (state_dir / "refresh").unlink()
     wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
-    # A status command that hangs is stopped at its deadline and said so;
-    # sleep stays off until a read succeeds.
-    (base / "hang-state").touch()
-    (state_dir / "refresh").touch()
-    value = wait_for(lambda s: s["stayAwake"] is None and "didn't finish" in s["lastError"])
-    assert not value["enabled"] and value["lastError"] == "omarchy toggle idle status didn't finish within 2 seconds", (
-        value
-    )
-    (base / "hang-state").unlink()
-    (state_dir / "refresh").unlink()
-    wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
+    # A status command that hangs is stopped at its deadline and said so,
+    # also one that ignores SIGTERM; sleep stays off until a read succeeds.
+    for hang in ("", "stubborn"):
+        (base / "hang-state").write_text(hang)
+        (state_dir / "refresh").touch()
+        value = wait_for(lambda s: s["stayAwake"] is None and s["lastError"] != "")
+        assert (
+            not value["enabled"] and value["lastError"] == "omarchy toggle idle status didn't finish within 2 seconds"
+        ), value
+        (base / "hang-state").unlink()
+        (state_dir / "refresh").unlink()
+        wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
     # Stay awake turned on while a read is running is not lost: that read took
     # its answer before the change, so the service reads once more. Other tools
     # write to the same indicators directory and start reads too. The hold
@@ -901,14 +929,16 @@ try:
     assert value["policy"]["batteryTimeoutSec"] == 900, value
     wait_for(lambda s: "config-unknown-keys: batterytimeoutSec" in (base / "runtime.log").read_text())
     print(
-        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
+        "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs (also ignoring SIGTERM), a Stay awake change during a read is not lost, disabled timeouts"
     )
     # The chassis probe runs once per start. One that hangs, fails, can't run
     # hostnamectl or can't start at all leaves the chassis unknown (not a
     # laptop) and says why; a laptops-only policy stays off. Of a failure's
     # error output, status shows the first line, cut at 200 characters. A
     # hung hostnamectl is stopped at the deadline, also one that ignores
-    # SIGTERM: it doesn't outlive the probe.
+    # SIGTERM: it doesn't outlive the probe. A SIGKILL from elsewhere ends
+    # the probe like the deadline's own SIGKILL, but before the deadline it
+    # is a failure.
     write_config()
     hostnamectl = bin_dir / "hostnamectl"
     chassis_pid = base / "chassis-pid"
@@ -923,6 +953,7 @@ try:
     for setup, expected in [
         (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
         (lambda: (base / "hang-chassis").write_text("stubborn"), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "chassis-killed").touch(), "hostnamectl chassis failed"),
         (lambda: (base / "chassis-error").touch(), "\U0001f634" * 199 + "…"),
         (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
         (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
@@ -930,6 +961,7 @@ try:
     ]:
         process.stop()
         (base / "hang-chassis").unlink(missing_ok=True)
+        (base / "chassis-killed").unlink(missing_ok=True)
         (base / "chassis-error").unlink(missing_ok=True)
         chassis_pid.unlink(missing_ok=True)
         hostnamectl.chmod(0o755)
@@ -943,7 +975,30 @@ try:
             pid = chassis_pid.read_text().strip()
             assert harness.wait_for(lambda pid=pid: ended(pid), 5), "hostnamectl %s still runs" % pid
     print(
-        "PASS: a chassis probe that hangs (also ignoring SIGTERM), fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
+        "PASS: a chassis probe that hangs (also ignoring SIGTERM), is killed before its deadline, fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
+    )
+    # The failed chassis check (hostnamectl is gone) has its own place in
+    # lastError: a sleep attempt, which laptopsOnly false allows, doesn't
+    # erase it. While it keeps a laptops-only policy off it comes first;
+    # otherwise the newer error of the last attempt does.
+    write_config(laptopsOnly=False)
+    wait_for(lambda s: s["enabled"] and s["lastError"] == "hostnamectl chassis couldn't start")
+    (base / "fail-sleep").touch()
+    ipc("test", "state", True, True, False)
+    wait_for(
+        lambda s: s["lastError"] == "mock sleep unavailable." and s["phase"] == "idle",
+        message="the failed attempt's error is hidden behind a chassis error that keeps nothing off",
+    )
+    write_config()
+    value = wait_for(lambda s: s["policy"]["laptopsOnly"] and not s["enabled"])
+    assert value["lastError"] == "hostnamectl chassis couldn't start", (
+        "a laptops-only policy is off, but lastError doesn't say why",
+        value,
+    )
+    ipc("test", "state", True, False, False)
+    (base / "fail-sleep").unlink()
+    print(
+        "PASS: a failed chassis check stays in lastError after a sleep attempt, first while it keeps a laptops-only policy off"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)
