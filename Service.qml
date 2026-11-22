@@ -28,6 +28,11 @@ Item {
   // Deadline for `omarchy toggle idle status` (it normally answers in tens
   // of milliseconds); a hung read would otherwise keep sleep off silently.
   readonly property int stayAwakeTimeoutSec: 5
+  // Deadline for `hostnamectl chassis`, which runs once per shell start.
+  // Longer than hostnamectl's own 25 s D-Bus call timeout, so a slow
+  // systemd-hostnamed at login still answers; it stops only a probe that
+  // would never end and keep a laptops-only policy off without a reason.
+  readonly property int chassisTimeoutSec: 30
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -585,7 +590,13 @@ Item {
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
     root.chassisLoaded = true
     if (exitCode !== 0) {
-      root.processError = String(errorText || "hostnamectl chassis failed").trim()
+      // timeout's own codes: 124/137 the deadline, 126/127 hostnamectl couldn't run.
+      if (exitCode === 124 || exitCode === 137)
+        root.processError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
+      else if (exitCode === 126 || exitCode === 127)
+        root.processError = "hostnamectl chassis couldn't start"
+      else
+        root.processError = String(errorText || "hostnamectl chassis failed").trim()
       root.logEvent("chassis-error", root.processError)
     } else {
       root.logEvent("chassis-ready", root.chassis)
@@ -595,7 +606,7 @@ Item {
   Process {
     id: chassisProbe
     property bool exitSeen: false
-    command: ["hostnamectl", "chassis"]
+    command: ["timeout", "--kill-after=1s", root.chassisTimeoutSec + "s", "hostnamectl", "chassis"]
     stdout: StdioCollector {
       id: chassisOutput
       waitForEnd: true
@@ -608,7 +619,7 @@ Item {
       chassisProbe.exitSeen = true
       root.chassisRead(exitCode, chassisOutput.text, chassisError.text)
     }
-    // Not running without an exit: hostnamectl couldn't start. Not a laptop
+    // Not running without an exit: `timeout` couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
     onRunningChanged: {
       if (running || exitSeen)

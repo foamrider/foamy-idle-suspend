@@ -47,6 +47,7 @@ for old, new in [
     ("readonly property int retryBaseMs: 60000", "readonly property int retryBaseMs: 700"),
     ("readonly property int suspendWatchdogMs: 60000", "readonly property int suspendWatchdogMs: 4000"),
     ("readonly property int stayAwakeTimeoutSec: 5", "readonly property int stayAwakeTimeoutSec: 2"),
+    ("readonly property int chassisTimeoutSec: 30", "readonly property int chassisTimeoutSec: 2"),
     ("readonly property int configRereadMs: 250", "readonly property int configRereadMs: 3000"),
 ]:
     assert old in service, old
@@ -57,12 +58,17 @@ for old, new in [
 for old, new, places in [
     ('["systemctl", ', '["%s/systemctl", ' % bin_dir, 1),
     ('"omarchy", "toggle", "idle", "status"]', '"%s/omarchy", "toggle", "idle", "status"]' % bin_dir, 1),
-    ('["hostnamectl", "chassis"]', '["%s/hostnamectl", "chassis"]' % bin_dir, 1),
+    ('"hostnamectl", "chassis"]', '"%s/hostnamectl", "chassis"]' % bin_dir, 1),
     ('"notify-send"', '"%s/notify-send"' % bin_dir, 3),
     ('"busctl", "--system"', '"%s/busctl", "--system"' % bin_dir, 1),
     # The probes' and the lock's own `timeout`, so the test can make each one
     # unstartable.
     ('["timeout", "--kill-after=1s", "3s", ', '["%s/inhibit-timeout", "--kill-after=1s", "3s", ' % bin_dir, 1),
+    (
+        '["timeout", "--kill-after=1s", root.chassisTimeoutSec',
+        '["%s/chassis-timeout", "--kill-after=1s", root.chassisTimeoutSec' % bin_dir,
+        1,
+    ),
     (
         '["timeout", "--kill-after=1s", "5s", "bash"',
         '["%s/probe-timeout", "--kill-after=1s", "5s", "bash"' % bin_dir,
@@ -139,7 +145,9 @@ json() {
 }
 read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
 case $name in
-  hostnamectl) echo laptop ;;
+  hostnamectl)
+    [[ -e $home/hang-chassis ]] && exec sleep 30
+    echo laptop ;;
   omarchy)
     [[ -e $home/hang-state ]] && sleep 30
     if [[ -e $home/bad-state ]]; then answer='invalid state'
@@ -192,10 +200,10 @@ for name in ["hostnamectl", "omarchy", "systemctl", "notify-send", "busctl", "om
     file = bin_dir / name
     file.write_text(command)
     file.chmod(0o755)
-inhibit_timeout, probe_timeout, lock_timeout = (
-    bin_dir / n for n in ("inhibit-timeout", "probe-timeout", "lock-timeout")
+inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout = (
+    bin_dir / n for n in ("inhibit-timeout", "probe-timeout", "lock-timeout", "chassis-timeout")
 )
-for wrapper in (inhibit_timeout, probe_timeout, lock_timeout):
+for wrapper in (inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout):
     wrapper.write_text('#!/bin/bash\nexec timeout "$@"\n')
     wrapper.chmod(0o755)
 # This machine (and most stock installs) cannot hibernate.
@@ -878,15 +886,29 @@ try:
     print(
         "PASS: Stay awake (announced only when active), invalid configuration/state, a status command that cannot start or hangs, a Stay awake change during a read is not lost, disabled timeouts"
     )
-    # hostnamectl can't start: the chassis is unknown (not a laptop) and says why.
-    process.stop()
+    # The chassis probe runs once per start. One that hangs, can't run
+    # hostnamectl or can't start at all leaves the chassis unknown (not a
+    # laptop) and says why; a laptops-only policy stays off.
     write_config()
-    (bin_dir / "hostnamectl").unlink()
-    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
-    value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
-    assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
-    assert value["lastError"] == "hostnamectl chassis couldn't start", value
-    print("PASS: a chassis probe that cannot start is reported and keeps a laptops-only policy off")
+    hostnamectl = bin_dir / "hostnamectl"
+    for setup, expected in [
+        (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
+        (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
+        (hostnamectl.unlink, "hostnamectl chassis couldn't start"),
+    ]:
+        process.stop()
+        (base / "hang-chassis").unlink(missing_ok=True)
+        hostnamectl.chmod(0o755)
+        chassis_timeout.chmod(0o755)
+        setup()
+        process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+        value = wait_for(lambda s: s["chassisLoaded"] and s["stayAwake"] is False)
+        assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
+        assert value["lastError"] == expected, value
+    print(
+        "PASS: a chassis probe that hangs, cannot run hostnamectl or cannot start is reported and keeps a laptops-only policy off"
+    )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)
     # A script error in a handler would leave an attempt stuck mid-phase.
