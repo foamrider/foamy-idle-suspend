@@ -585,16 +585,13 @@ Item {
     }
   }
 
-  function chassisRead(exitCode, crashed, text, errorText) {
+  function chassisRead(exitCode, timedOut, text, errorText) {
     root.chassis = String(text || "").trim() || "unknown"
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
     root.chassisLoaded = true
     if (exitCode !== 0) {
-      // timeout's own codes: 124 the deadline, 126/127 hostnamectl couldn't
-      // run. A hostnamectl that ignores SIGTERM gets --kill-after's SIGKILL,
-      // which timeout sends to its whole process group, itself included: that
-      // deadline ends as a crash by signal 9, never as code 137.
-      if (exitCode === 124 || (crashed && exitCode === 9))
+      // 126/127 are timeout's own codes: hostnamectl couldn't run.
+      if (timedOut)
         root.processError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
       else if (exitCode === 126 || exitCode === 127)
         root.processError = "hostnamectl chassis couldn't start"
@@ -609,6 +606,7 @@ Item {
   Process {
     id: chassisProbe
     property bool exitSeen: false
+    property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.chassisTimeoutSec + "s", "hostnamectl", "chassis"]
     stdout: StdioCollector {
       id: chassisOutput
@@ -620,7 +618,7 @@ Item {
     }
     onExited: function (exitCode, exitStatus) {
       chassisProbe.exitSeen = true
-      root.chassisRead(exitCode, exitStatus !== 0, chassisOutput.text, chassisError.text)
+      root.chassisRead(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - chassisProbe.startedAt, root.chassisTimeoutSec * 1000), chassisOutput.text, chassisError.text)
     }
     // Not running without an exit: `timeout` couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
@@ -759,6 +757,7 @@ Item {
 
   Component.onCompleted: {
     logEvent("service-ready")
+    chassisProbe.startedAt = Date.now()
     chassisProbe.running = true
     probeActions()
     refreshStayAwakeState()

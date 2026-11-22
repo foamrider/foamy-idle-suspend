@@ -146,6 +146,9 @@ json() {
 read_or() { if [[ -e $home/$1 ]]; then tr -d '\n' < "$home/$1"; else printf '%s' "$2"; fi; }
 case $name in
   hostnamectl)
+    # Killed from elsewhere (the OOM killer) long before the deadline:
+    # timeout passes the SIGKILL on to itself.
+    [[ -e $home/chassis-killed ]] && kill -KILL $$
     if [[ -e $home/hang-chassis ]]; then
       echo $$ > "$home/chassis-pid"
       # One that ignores SIGTERM is stopped only by timeout's --kill-after.
@@ -908,7 +911,9 @@ try:
     # laptop) and says why; a laptops-only policy stays off. Of a failure's
     # error output, status shows the first line, cut at 200 characters. A
     # hung hostnamectl is stopped at the deadline, also one that ignores
-    # SIGTERM: it doesn't outlive the probe.
+    # SIGTERM: it doesn't outlive the probe. A SIGKILL from elsewhere ends
+    # the probe like the deadline's own SIGKILL, but before the deadline it
+    # is a failure.
     write_config()
     hostnamectl = bin_dir / "hostnamectl"
     chassis_pid = base / "chassis-pid"
@@ -923,6 +928,7 @@ try:
     for setup, expected in [
         (lambda: (base / "hang-chassis").touch(), "hostnamectl chassis didn't finish within 2 seconds"),
         (lambda: (base / "hang-chassis").write_text("stubborn"), "hostnamectl chassis didn't finish within 2 seconds"),
+        (lambda: (base / "chassis-killed").touch(), "hostnamectl chassis failed"),
         (lambda: (base / "chassis-error").touch(), "\U0001f634" * 199 + "…"),
         (lambda: hostnamectl.chmod(0o644), "hostnamectl chassis couldn't start"),
         (lambda: chassis_timeout.chmod(0o644), "hostnamectl chassis couldn't start"),
@@ -930,6 +936,7 @@ try:
     ]:
         process.stop()
         (base / "hang-chassis").unlink(missing_ok=True)
+        (base / "chassis-killed").unlink(missing_ok=True)
         (base / "chassis-error").unlink(missing_ok=True)
         chassis_pid.unlink(missing_ok=True)
         hostnamectl.chmod(0o755)
@@ -943,7 +950,7 @@ try:
             pid = chassis_pid.read_text().strip()
             assert harness.wait_for(lambda pid=pid: ended(pid), 5), "hostnamectl %s still runs" % pid
     print(
-        "PASS: a chassis probe that hangs (also ignoring SIGTERM), fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
+        "PASS: a chassis probe that hangs (also ignoring SIGTERM), is killed before its deadline, fails, cannot run hostnamectl or cannot start is reported, its error output bounded, and keeps a laptops-only policy off; a hung hostnamectl is stopped"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)

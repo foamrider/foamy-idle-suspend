@@ -146,6 +146,18 @@ function errorLine(text) {
   return chars.length > 200 ? chars.slice(0, 199).join("") + "…" : line
 }
 
+// Whether a command run as `timeout --kill-after=1s <limit> <command>` was
+// stopped at its deadline. timeout exits 124 when the command ends on its
+// SIGTERM. A command that ignores SIGTERM gets --kill-after's SIGKILL, which
+// timeout sends to its whole process group, itself included: Quickshell
+// reports a crash by signal 9, never code 137. A SIGKILL from elsewhere (the
+// OOM killer), of timeout or of the command alone (timeout passes it on to
+// itself), ends the same way, so that crash counts as the deadline only once
+// the limit has passed.
+function stoppedAtDeadline(exitCode, crashed, elapsedMs, limitMs) {
+  return crashed ? exitCode === 9 && elapsedMs >= limitMs : exitCode === 124
+}
+
 // The inhibitor probe's result: logind's BlockInhibited property as busctl
 // --json=short prints it ({ ok: true, value: "idle:sleep" }, see
 // blockedByInhibitor), or { ok: false, error } when busctl failed, timed out
