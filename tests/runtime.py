@@ -128,6 +128,22 @@ ShellRoot {
     // is queued for after the running read.
     function readStayAwake(): string { service.refreshStayAwakeState(); return "ok" }
     function stayAwakeQueued(): string { return String(service.stateRefreshPending) }
+    // The test, not the clock, runs the chassis retry: chassisRetry() says
+    // when the next check is due (ms, or "none"), fireChassisRetry() runs it
+    // now as the timer would, stopped first: a single-shot timer is no
+    // longer running when it triggers.
+    function chassisRetry(): string {
+      var timer = service.chassisRetryTimer
+      return timer && timer.running ? String(timer.interval) : "none"
+    }
+    function fireChassisRetry(): string {
+      var timer = service.chassisRetryTimer
+      if (!timer || !timer.running)
+        return "none"
+      timer.stop()
+      timer.triggered()
+      return "ok"
+    }
   }
 }
 """)
@@ -163,6 +179,13 @@ case $name in
       # 300 x U+1F634, two UTF-16 units each: the cut must keep whole characters.
       printf '\360\237\230\264%.0s' {1..300} >&2
       printf '\nsecond line\n' >&2
+      exit 1
+    fi
+    # chassis-failures holds how many more checks fail before one answers.
+    left=$(read_or chassis-failures 0)
+    if ((left > 0)); then
+      echo $((left - 1)) > "$home/chassis-failures"
+      echo 'Could not get property: Connection timed out' >&2
       exit 1
     fi
     echo laptop ;;
@@ -701,6 +724,19 @@ try:
     ipc("test", "state", True, True, False)
     wait_for(lambda s: sleep_calls()[-1] == ["systemctl", "suspend"])
     active()
+    # A new suspendAction gets its own notice: set to suspend and back, it
+    # says so again. Once: the action probe that follows the change answers
+    # after config-ready, and its answer must not say it a second time.
+    write_config(suspendAction="suspend")
+    wait_for(lambda s: s["policy"]["suspendAction"] == "suspend" and not s["actionFallback"])
+    start = len(log_text())
+    write_config(suspendAction="suspend-then-hibernate")
+    assert harness.wait_for(
+        lambda: " actions: " in log_text()[start:].partition(" config-ready")[2], 30, stop=stopped
+    ), "no action probe answered after suspendAction changed"
+    fallbacks = log_text()[start:].count(" action-fallback: ")
+    assert fallbacks == 1, "suspendAction set away and back gave %d fallback notices, not 1" % fallbacks
+    wait_for(lambda s: notes().count("suspend-then-hibernate isn't available") == 2)
     # A failed request is reported once and retried with backoff.
     (base / "fail-sleep").touch()
     write_config(acTimeoutSec=1800, suspendAction="suspend")
@@ -742,7 +778,7 @@ try:
     active(False)
     (base / "fail-sleep").unlink()
     print(
-        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
+        "PASS: no sleep action notifies once per configuration; unavailable action falls back to suspend with a notification, once more after suspendAction is set away and back; failed sleep notifies once with the first line of its error and backs off; input resets the failure streak and stops the retry"
     )
 
     # A sleep request that never ends: the watchdog stops it and reports it
@@ -999,6 +1035,56 @@ try:
     (base / "fail-sleep").unlink()
     print(
         "PASS: a failed chassis check stays in lastError after a sleep attempt, first while it keeps a laptops-only policy off"
+    )
+    # A failed chassis check (systemd-hostnamed slow or not up yet at login)
+    # is asked again after 1, 5 and 15 minutes, then no more; one that
+    # answers ends the retries. The test fires each retry once it is due, so
+    # nothing waits for minutes.
+    hostnamectl.write_text(command)
+    hostnamectl.chmod(0o755)
+    chassis_failures = base / "chassis-failures"
+
+    def chassis_retry():
+        return ipc("test", "chassisRetry")
+
+    def fire_chassis_retry():
+        assert ipc("test", "fireChassisRetry") == "ok", "no chassis check was due"
+
+    # It fails at shell start and answers when asked again: a laptops-only
+    # policy turns on without a shell restart, and no retry is left.
+    process.stop()
+    chassis_failures.write_text("1")
+    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+    value = wait_for(lambda s: s["chassisLoaded"] and s["configValid"] and s["stayAwake"] is False)
+    assert not value["enabled"] and value["lastError"] == "Could not get property: Connection timed out", value
+    assert chassis_retry() == "60000", "a failed chassis check is not asked again after a minute: " + chassis_retry()
+    fire_chassis_retry()
+    value = wait_for(lambda s: s["isLaptop"], message="the chassis check asked again didn't count")
+    assert value["enabled"] and value["chassis"] == "laptop", value
+    assert value["lastError"] == "", ("the error stayed after a chassis check answered", value)
+    assert chassis_retry() == "none", "a chassis check that answered left a retry"
+    # It never answers: asked again after 1, 5 and 15 minutes, then no more.
+    # Here the retries can't even start, and each one is still followed by
+    # the next.
+    process.stop()
+    chassis_failures.write_text("1")
+    start = len(log_text())
+    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+    wait_for(lambda s: s["chassisLoaded"] and s["configValid"] and s["stayAwake"] is False)
+    chassis_timeout.chmod(0o644)
+    for due in ("60000", "300000", "900000"):
+        assert chassis_retry() == due, "the next chassis check is not due in %s ms: %s" % (due, chassis_retry())
+        errors = log_text()[start:].count(" chassis-error: ")
+        fire_chassis_retry()
+        assert harness.wait_for(
+            lambda errors=errors: log_text()[start:].count(" chassis-error: ") > errors, 30, stop=stopped
+        ), "a chassis check asked again that couldn't start never ended"
+    assert chassis_retry() == "none", "a chassis check was asked again after three retries"
+    value = status()
+    assert not value["enabled"] and value["lastError"] == "hostnamectl chassis couldn't start", value
+    chassis_timeout.chmod(0o755)
+    print(
+        "PASS: a failed chassis check is asked again after 1, 5 and 15 minutes, then no more, also when a retry can't start; one that answers turns a laptops-only policy on and ends the retries"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)

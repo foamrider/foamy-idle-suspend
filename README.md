@@ -42,7 +42,7 @@ containing only `"id": "foamy.idle-suspend"` has the same behavior.
 | --- | --- | --- |
 | `batteryTimeoutSec` | `900` | Idle seconds before sleeping while UPower reports battery power. |
 | `acTimeoutSec` | `null` | Idle seconds before sleeping while UPower reports AC power. |
-| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. It is asked once when the shell starts; if it fails, can't start or gives no answer within 30 seconds, the computer counts as not a laptop and status shows why in `lastError`. Set `false` to allow desktops and other chassis types. |
+| `laptopsOnly` | `true` | Require `hostnamectl chassis` to report `laptop`. It is asked when the shell starts; if it fails, can't start or gives no answer within 30 seconds, the computer counts as not a laptop and status shows why in `lastError`. After a failure it is asked again in 1 minute, after a second failure in 5 minutes and after a third in 15 minutes; after a fourth, only a shell restart asks again. An answer ends the retries and clears the error. Set `false` to allow desktops and other chassis types. |
 | `suspendAction` | `"auto"` | The systemd sleep action to run when the active timeout expires. `"auto"` picks one on each attempt (see below). |
 | `pauseForMedia` | `true` | Wait while any MPRIS player (music, video, podcast, browser tab) is playing. Paused players do not count. |
 | `lockBeforeSuspend` | `true` | Lock the screen and wait until the lock reports it is secure before sleeping. If it cannot lock, it does not sleep. |
@@ -101,7 +101,7 @@ This plugin does not configure swap, hibernation support, or systemd's
 hibernation delay. Before every sleep it asks logind which actions are available.
 An explicitly chosen action the machine cannot run (for example
 `suspend-then-hibernate` without `omarchy-hibernation-setup`) falls back to
-`suspend` with a notification, once. `"auto"` never notifies: it simply uses what
+`suspend` with a notification, once until `suspendAction` changes. `"auto"` never notifies: it simply uses what
 the machine supports. Status reports `effectiveAction` (the action the next sleep
 uses), `autoAction` (what `"auto"` resolved to, or `null` for an explicit
 action), `actionFallback` and `actionSupport`. Configurations that set
