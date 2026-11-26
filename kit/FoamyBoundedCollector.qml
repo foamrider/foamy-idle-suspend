@@ -1,4 +1,4 @@
-// foamy-kit 0.14.0 1fc4248ee077efd167203fbef50fa23a2978d6336c490a3a8f8324ac9a979639 — do not edit; change foamy-kit and run sync
+// foamy-kit 0.14.1 1fc4248ee077efd167203fbef50fa23a2978d6336c490a3a8f8324ac9a979639 — do not edit; change foamy-kit and run sync
 import QtQuick
 import Quickshell.Io
 
