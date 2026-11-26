@@ -1,8 +1,8 @@
 # foamy-kit.lock: written by foamy-kit sync.sh; do not edit.
 # Hashes are of each file's body (the file without its stamp line);
-# notices and REVIEW.md are hashed whole. tests/kit-check.sh verifies them.
-version 0.13.1
-source f9a44b24e683873a48029faf32064b54e1338fea
+# notices, REVIEW.md and kit/i18n-texts.json are hashed whole. tests/kit-check.sh verifies them.
+version 0.14.0
+source d9804f5f10a1790d4c1eebab320ede681fe6889a
 components FoamyI18n,FoamyIpc
 5079c3e4ecd2ca5399dff48f64327729d8e84916a4c73fbcb9e0491b16014990  .github/workflows/checks.yml
 23adc6c9c393c6f29eab5dcbabc13a27a38abdee1cf78c07efb69879dc28f6f7  .oxlintrc.json
@@ -13,10 +13,11 @@ a541e98f164e6c2e83b493341e50b128ba539dc4f32cf2253fb688731a513c3c  kit/FoamyI18nT
 59287c6def66c4158c02d1569fd08656ef9684f82ed324544c4141b79a086ace  kit/FoamyIpc.qml
 04c7e30a4501692cfa778a7999d12f42e81c03047cf06a1a8c69a966f74b915a  kit/FoamyIpcPreference.qml
 72e0502f9cd35ca638b6af1c5e3e5411738a161cff2ed18f5751e11e9365f48c  kit/FoamyIpcResolver.js
+4ca96fe007e5748a4510345e61d6ce86d38013d35714d466ea400d89aad8a49c  kit/i18n-texts.json
 90b1a10f5f5005c94031f36fef0ad3d8e705cf4e13372dd8362ef4579e0a93df  kit/node-loader.cjs
 e15eb41e7ca505c37a4a401ea4da856b268585d7ef376c19573d59a153d5256e  kit/qmldir
 824921f5001a1e69101a6dd998f21bee83fe155c3d1ad82aa376aef6d6fbebb4  kit/tooling/validate.py
 4d8c9ad0403a76291a2c89eff71dcdd370281814bbb9055e9c7bf88961b7d6ac  mise.toml
 30062b8bc91b2af48aa4124370f8b9552b2077ad032173dbf5690de4526c7c0d  ruff.toml
-e81c49df3c7766c89a7fb05c3b7d5d558638cb123e95237680999a290b1befa1  tests/kit-check.sh
+4416fd57dc4cd00075a16b60166bf0d61662a18920573b2b0c5e67c64a1a86fe  tests/kit-check.sh
 600483edb58f93da9e745500dac4efa7c5ef9fd23151a67fc2106ee1e07fbca9  tests/validate.sh
