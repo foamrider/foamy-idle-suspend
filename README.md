@@ -173,8 +173,9 @@ Status includes the effective policy and sleep action, configuration validity
 and `unknownKeys`,
 chassis, power source, Stay awake state, enabled monitors, whether media is
 playing, the current attempt (`phase`, `deferredReason`, `lastLockResult`,
-`failureStreak`, `retryScheduled`) and the latest error. On Omarchy 4.5 the
-call is answered over the shell socket. `enabled`
+`failureStreak`, `retryScheduled`) and the latest error. The service keeps at
+most 4096 characters of what each command prints, and a check whose reply is
+longer counts as failed. On Omarchy 4.5 the call is answered over the shell socket. `enabled`
 means a sleep monitor is currently enabled, so it is `false` on AC with the
 default settings, on a desktop with `laptopsOnly: true`, or while Stay awake
 is enabled. The `debug` method returns the same data.
@@ -206,7 +207,8 @@ The runtime test targets Omarchy 4.5 and loads the installed
 The runtime test uses a temporary home with mocked power, idle events, and
 system commands (bash stand-ins reached by absolute path). It tests real Quickshell configuration watching and process
 handling, including invalid settings, failed, hung and unstartable sleep
-requests, and status commands that can't start. It requires
+requests, status commands that can't start, and commands that print more than
+the service keeps. It requires
 local IPC socket access and never suspends the machine. Actual compositor idle
 delivery and physical suspend/resume need separate validation on a target machine.
 

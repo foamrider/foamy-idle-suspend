@@ -178,7 +178,9 @@ case $name in
     if [[ -e $home/chassis-error ]]; then
       # 300 x U+1F634, two UTF-16 units each: the cut must keep whole characters.
       printf '\360\237\230\264%.0s' {1..300} >&2
-      printf '\nsecond line\n' >&2
+      # Then more than the service keeps (4096 characters): the start it
+      # keeps must still hold the line status shows.
+      printf '\nsecond line\n%8192s\n' '' >&2
       exit 1
     fi
     # chassis-failures holds how many more checks fail before one answers.
@@ -204,11 +206,15 @@ case $name in
       : > "$home/state-held"
       while [[ -e $home/state-hold ]]; do sleep 0.02; done
     fi
-    echo "$answer" ;;
+    echo "$answer"
+    # Then more than the service keeps (see the wrappers below).
+    if [[ -e $home/flood-omarchy ]]; then printf '%8192s\n' ''; fi ;;
   busctl)
     if [[ " $* " == *" get-property "* ]]; then
       if [[ -e $home/inhibitor-fail ]]; then
-        echo 'Failed to get property BlockInhibited: Connection timed out' >&2; exit 1
+        # The file's text, if any, is the reason.
+        reason=$(read_or inhibitor-fail '')
+        echo "Failed to get property BlockInhibited: ${reason:-Connection timed out}" >&2; exit 1
       fi
       if [[ -e $home/inhibitor-hang ]]; then
         # Ignores SIGTERM: only timeout's --kill-after stops it.
@@ -243,7 +249,12 @@ case $name in
     # The next attempt must lock again.
     rm -f "$home/locked" "$home/lock-requested"
     if [[ -e $home/fail-sleep ]]; then
-      printf 'mock sleep unavailable.\nPlease retry operation after closing inhibitors.\n' >&2
+      # "flood": an error line, then more than the service keeps.
+      if [[ $(< "$home/fail-sleep") == flood ]]; then
+        printf 'mock sleep refused.\n%8192s\n' '' >&2
+      else
+        printf 'mock sleep unavailable.\nPlease retry operation after closing inhibitors.\n' >&2
+      fi
       exit 1
     fi ;;
   *) json "$@" ;;
@@ -257,7 +268,13 @@ inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout = (
     bin_dir / n for n in ("inhibit-timeout", "probe-timeout", "lock-timeout", "chassis-timeout")
 )
 for wrapper in (inhibit_timeout, probe_timeout, lock_timeout, chassis_timeout):
-    wrapper.write_text('#!/bin/bash\nexec timeout "$@"\n')
+    # flood-<wrapper name> in $HOME: after the command's own output, 8192
+    # blank characters, twice what the service keeps. Every reader skips
+    # blank space, so read whole, the command's usual answer would count.
+    wrapper.write_text(
+        '#!/bin/bash\n[[ -e $HOME/flood-${0##*/} ]] || exec timeout "$@"\n'
+        'timeout "$@"\nstatus=$?\nprintf "%8192s\\n" ""\nexit $status\n'
+    )
     wrapper.chmod(0o755)
 # This machine (and most stock installs) cannot hibernate.
 (base / "can-CanSuspendThenHibernate").write_text("na")
@@ -836,6 +853,89 @@ try:
     )
     active(False)
     print("PASS: a hung or unstartable sleep command ends the attempt with one report and a retry")
+
+    # A command that prints more than the service keeps of its output (4096
+    # characters) gives no answer, even when all it printed would read as one:
+    # a flooded command prints its usual answer, then 8192 blank characters
+    # that every reader skips. The check after it reads only its own output.
+    def flood(name):
+        return base / ("flood-" + name)
+
+    # The logind inhibitor check: sleep waits, says why and asks again.
+    flood("inhibit-timeout").touch()
+    count = len(sleep_calls())
+    ipc("test", "state", False, True, False)
+    value = wait_for(lambda s: s["deferredReason"] == "inhibitor-check-failed" and s["retryScheduled"])
+    assert value["lastError"] == "Couldn't check logind inhibitors: busctl printed more than 4096 characters", value
+    assert len(sleep_calls()) == count, "slept on an inhibitor reply cut at the bound"
+    flood("inhibit-timeout").unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    value = wait_for(lambda s: s["phase"] == "idle")
+    assert value["lastError"] == "", value
+    active(False)
+    # busctl's error output: a failed check shows its own, not the one the
+    # failed checks before it left behind.
+    (base / "inhibitor-fail").write_text("Access denied")
+    count = len(sleep_calls())
+    ipc("test", "state", False, True, False)
+    value = wait_for(lambda s: s["deferredReason"] == "inhibitor-check-failed" and s["retryScheduled"])
+    assert (
+        value["lastError"] == "Couldn't check logind inhibitors: Failed to get property BlockInhibited: Access denied"
+    ), value
+    (base / "inhibitor-fail").unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    active(False)
+    # The action probe: no answer for any action, as when it can't start; the
+    # attempt goes on and systemctl decides.
+    flood("probe-timeout").touch()
+    count = len(sleep_calls())
+    start = len(log_text())
+    ipc("test", "state", False, True, False)
+    value = wait_for(lambda s: len(sleep_calls()) >= count + 1 and s["phase"] == "idle")
+    assert value["actionSupport"] == {}, value
+    logged = log_text()[start:]
+    assert " actions-error: the action probe printed more than 4096 characters" in logged, logged
+    flood("probe-timeout").unlink()
+    active(False)
+    count = len(sleep_calls())
+    ipc("test", "state", False, True, False)
+    value = wait_for(lambda s: len(sleep_calls()) >= count + 1 and s["phase"] == "idle")
+    assert value["actionSupport"].get("suspend") == "yes", ("the probe after a cut reply got no answer", value)
+    active(False)
+    # The lock: no secure lock, so no sleep; the usual report and a retry.
+    flood("lock-timeout").touch()
+    count = len(sleep_calls())
+    ipc("test", "state", False, True, False)
+    value = wait_for(lambda s: s["lastLockResult"] == "output-too-long" and s["phase"] == "idle")
+    assert value["lastError"] == "The screen did not lock (output-too-long)" and value["retryScheduled"], value
+    assert len(sleep_calls()) == count, "slept on a lock reply cut at the bound"
+    flood("lock-timeout").unlink()
+    wait_for(lambda s: len(sleep_calls()) >= count + 1)
+    active(False)
+    # systemctl's error output: status shows its first line, and the next
+    # failure its own.
+    (base / "fail-sleep").write_text("flood")
+    ipc("test", "state", False, True, False)
+    wait_for(lambda s: s["lastError"] == "mock sleep refused." and s["retryScheduled"])
+    (base / "fail-sleep").write_text("")
+    wait_for(
+        lambda s: s["lastError"] == "mock sleep unavailable." and s["retryScheduled"],
+        message="the next failure shows the error of the one before",
+    )
+    (base / "fail-sleep").unlink()
+    wait_for(lambda s: s["phase"] == "idle" and s["failureStreak"] == 0 and s["lastError"] == "")
+    active(False)
+    # The Stay awake read: the state stays unknown, so sleep stays off.
+    flood("omarchy").touch()
+    (state_dir / "refresh").touch()
+    value = wait_for(lambda s: s["stayAwake"] is None and s["lastError"] != "")
+    assert not value["enabled"] and value["lastError"] == "Error: idle status printed more than 4096 characters", value
+    flood("omarchy").unlink()
+    (state_dir / "refresh").unlink()
+    wait_for(lambda s: s["enabled"] and s["stayAwake"] is False and s["lastError"] == "")
+    print(
+        "PASS: a reply past the 4096-character bound is no answer, and the next check reads its own: an inhibitor check defers, an action probe answers for no action, a lock is not secure, a Stay awake read keeps sleep off; systemctl's error past the bound shows its first line, the next failure its own; a failed inhibitor check shows its own error"
+    )
     awake = state_dir / "stay-awake"
     awake.touch()
     wait_for(lambda s: s["stayAwake"] is True and not s["enabled"])
@@ -970,7 +1070,8 @@ try:
     # The chassis probe runs once per start. One that hangs, fails, can't run
     # hostnamectl or can't start at all leaves the chassis unknown (not a
     # laptop) and says why; a laptops-only policy stays off. Of a failure's
-    # error output, status shows the first line, cut at 200 characters. A
+    # error output, status shows the first line, cut at 200 characters, also
+    # from output longer than the service keeps. A
     # hung hostnamectl is stopped at the deadline, also one that ignores
     # SIGTERM: it doesn't outlive the probe. A SIGKILL from elsewhere ends
     # the probe like the deadline's own SIGKILL, but before the deadline it
@@ -1063,6 +1164,30 @@ try:
     assert value["enabled"] and value["chassis"] == "laptop", value
     assert value["lastError"] == "", ("the error stayed after a chassis check answered", value)
     assert chassis_retry() == "none", "a chassis check that answered left a retry"
+    # It fails at start, then gives a reply past the bound, then another
+    # error, then answers: a reply past the bound fails like any other, its
+    # start not read as the chassis, and each check reads only its own output.
+    process.stop()
+    chassis_failures.write_text("1")
+    process = hostenv.ProcessGroup(["qs", "-p", str(app), "--no-color"], env=env, stdout=log, stderr=log)
+    value = wait_for(lambda s: s["chassisLoaded"] and s["configValid"] and s["stayAwake"] is False)
+    assert value["lastError"] == "Could not get property: Connection timed out", value
+    flood("chassis-timeout").touch()
+    fire_chassis_retry()
+    value = wait_for(lambda s: s["lastError"] != "Could not get property: Connection timed out")
+    assert value["chassis"] == "unknown" and not value["isLaptop"] and not value["enabled"], value
+    assert value["lastError"] == "hostnamectl chassis printed more than 4096 characters", value
+    flood("chassis-timeout").unlink()
+    (base / "chassis-error").touch()
+    fire_chassis_retry()
+    wait_for(
+        lambda s: s["lastError"] == "\U0001f634" * 199 + "…",
+        message="a chassis check asked again shows the error of an earlier one",
+    )
+    (base / "chassis-error").unlink()
+    fire_chassis_retry()
+    value = wait_for(lambda s: s["isLaptop"], message="the chassis check after a cut reply didn't count")
+    assert value["enabled"] and value["lastError"] == "", value
     # It never answers: asked again after 1, 5 and 15 minutes, then no more.
     # Here the retries can't even start, and each one is still followed by
     # the next.
@@ -1084,7 +1209,7 @@ try:
     assert not value["enabled"] and value["lastError"] == "hostnamectl chassis couldn't start", value
     chassis_timeout.chmod(0o755)
     print(
-        "PASS: a failed chassis check is asked again after 1, 5 and 15 minutes, then no more, also when a retry can't start; one that answers turns a laptops-only policy on and ends the retries"
+        "PASS: a failed chassis check is asked again after 1, 5 and 15 minutes, then no more, also when a retry can't start; one that answers turns a laptops-only policy on and ends the retries; a reply past the bound fails the same way, and each check asked again reads its own output"
     )
     runtime_log = (base / "runtime.log").read_text()
     hostenv.check(env, runtime_log)

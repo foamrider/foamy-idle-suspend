@@ -42,6 +42,13 @@ Item {
   property int chassisRetries: 0
   // Deadline for the logind inhibitor check; busctl normally answers at once.
   readonly property int inhibitorTimeoutSec: 3
+  // The most each check keeps of a command's stdout or stderr, in UTF-16
+  // units (FoamyBoundedCollector). Every reply is a line or a few short ones
+  // (a chassis word, a small JSON object, four logind answers, one lock
+  // word), and an error shows at most the first 200 characters of its first
+  // line (Policy.errorLine), 400 units: 4096 keeps all of that. A reply cut
+  // at the bound is never read as an answer.
+  readonly property int outputLimit: 4096
   readonly property bool suspendAllowed: Policy.allowed(policy, configuration.valid, chassisLoaded, isLaptop, idleEnabled)
   readonly property bool sleepActive: Policy.active(policy, configuration.valid, chassisLoaded, isLaptop)
   readonly property bool mediaPlaying: Policy.mediaPlaying(Mpris.players.values)
@@ -193,12 +200,18 @@ Item {
     inhibitorProbe.running = true
   }
 
-  function afterInhibitorCheck(exitCode, timedOut, text, errorText) {
+  // `cut`: busctl's reply ran past outputLimit, so it is no answer even
+  // when its start parses.
+  function afterInhibitorCheck(exitCode, timedOut, text, errorText, cut) {
     var source = root.attemptSource
     var check = timedOut ? {
       ok: false,
       value: "",
       error: "no answer within " + root.inhibitorTimeoutSec + " seconds"
+    } : exitCode === 0 && cut ? {
+      ok: false,
+      value: "",
+      error: "busctl printed more than " + root.outputLimit + " characters"
     } : Policy.readBlockInhibited(exitCode, text, errorText)
     root.blockInhibited = check.value
     root.inhibitorError = check.ok ? "" : "Couldn't check logind inhibitors: " + check.error
@@ -570,10 +583,11 @@ Item {
     property bool exitSeen: false
     property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.stayAwakeTimeoutSec + "s", "omarchy", "toggle", "idle", "status"]
-    stdout: StdioCollector {
+    stdout: FoamyBoundedCollector {
       id: awakeOutput
-      waitForEnd: true
+      limit: root.outputLimit
     }
+    onStarted: awakeOutput.clear()
     onExited: function (exitCode, exitStatus) {
       stayAwakeProbe.exitSeen = true
       // 126/127 are timeout's own codes: omarchy couldn't run.
@@ -585,6 +599,8 @@ Item {
         try {
           if (exitCode !== 0)
             throw new Error("idle status exited " + exitCode)
+          if (awakeOutput.truncated)
+            throw new Error("idle status printed more than " + root.outputLimit + " characters")
           const state = JSON.parse(awakeOutput.text)
           if (typeof state.enabled !== "boolean")
             throw new Error("idle status missing enabled")
@@ -619,18 +635,22 @@ Item {
     chassisProbe.running = true
   }
 
-  function chassisRead(exitCode, timedOut, text, errorText) {
-    root.chassis = String(text || "").trim() || "unknown"
+  // `cut`: the reply ran past outputLimit, so it is no answer and never
+  // read as the chassis.
+  function chassisRead(exitCode, timedOut, text, errorText, cut) {
+    root.chassis = cut ? "unknown" : String(text || "").trim() || "unknown"
     root.isLaptop = exitCode === 0 && root.chassis === "laptop"
     root.chassisLoaded = true
-    if (exitCode !== 0) {
+    if (exitCode !== 0 || cut) {
       // 126/127 are timeout's own codes: hostnamectl couldn't run.
       if (timedOut)
         root.chassisCheckError = "hostnamectl chassis didn't finish within " + root.chassisTimeoutSec + " seconds"
       else if (exitCode === 126 || exitCode === 127)
         root.chassisCheckError = "hostnamectl chassis couldn't start"
-      else
+      else if (exitCode !== 0)
         root.chassisCheckError = Policy.errorLine(errorText) || "hostnamectl chassis failed"
+      else
+        root.chassisCheckError = "hostnamectl chassis printed more than " + root.outputLimit + " characters"
       root.logEvent("chassis-error", root.chassisCheckError)
       if (root.chassisRetries < root.chassisRetryDelaysMs.length) {
         root.chassisRetryTimer.interval = root.chassisRetryDelaysMs[root.chassisRetries]
@@ -648,17 +668,21 @@ Item {
     property bool exitSeen: false
     property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.chassisTimeoutSec + "s", "hostnamectl", "chassis"]
-    stdout: StdioCollector {
+    stdout: FoamyBoundedCollector {
       id: chassisOutput
-      waitForEnd: true
+      limit: root.outputLimit
     }
-    stderr: StdioCollector {
+    stderr: FoamyBoundedCollector {
       id: chassisError
-      waitForEnd: true
+      limit: root.outputLimit
+    }
+    onStarted: {
+      chassisOutput.clear()
+      chassisError.clear()
     }
     onExited: function (exitCode, exitStatus) {
       chassisProbe.exitSeen = true
-      root.chassisRead(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - chassisProbe.startedAt, root.chassisTimeoutSec * 1000), chassisOutput.text, chassisError.text)
+      root.chassisRead(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - chassisProbe.startedAt, root.chassisTimeoutSec * 1000), chassisOutput.text, chassisError.text, chassisOutput.truncated)
     }
     // Not running without an exit: `timeout` couldn't start. Not a laptop
     // as far as we know, like a failed hostnamectl.
@@ -683,13 +707,18 @@ Item {
     id: actionProbe
     property bool exitSeen: false
     command: ["timeout", "--kill-after=1s", "5s", "bash", "-c", 'for m in CanSuspend CanHibernate CanHybridSleep CanSuspendThenHibernate; do printf "%s " "$m"; busctl --system --json=short call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "$m" 2>/dev/null || echo "{}"; done']
-    stdout: StdioCollector {
+    stdout: FoamyBoundedCollector {
       id: actionOutput
-      waitForEnd: true
+      limit: root.outputLimit
     }
+    onStarted: actionOutput.clear()
     onExited: {
       actionProbe.exitSeen = true
-      root.afterActionProbeRun(actionOutput.text)
+      // A reply cut at outputLimit is no answer for any action, like a
+      // probe that couldn't start.
+      if (actionOutput.truncated)
+        root.logEvent("actions-error", "the action probe printed more than " + root.outputLimit + " characters")
+      root.afterActionProbeRun(actionOutput.truncated ? "" : actionOutput.text)
     }
     // Not running without an exit: the probe couldn't start (no exited()).
     // No answer for any action, like a failed busctl call inside the probe:
@@ -711,13 +740,17 @@ Item {
     property bool exitSeen: false
     property double startedAt: 0
     command: ["timeout", "--kill-after=1s", root.inhibitorTimeoutSec + "s", "busctl", "--system", "--json=short", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "BlockInhibited"]
-    stdout: StdioCollector {
+    stdout: FoamyBoundedCollector {
       id: inhibitorOutput
-      waitForEnd: true
+      limit: root.outputLimit
     }
-    stderr: StdioCollector {
+    stderr: FoamyBoundedCollector {
       id: inhibitorErrorOutput
-      waitForEnd: true
+      limit: root.outputLimit
+    }
+    onStarted: {
+      inhibitorOutput.clear()
+      inhibitorErrorOutput.clear()
     }
     // Not running without an exit: the check couldn't start (no exited()).
     onRunningChanged: {
@@ -728,7 +761,7 @@ Item {
     }
     onExited: function (exitCode, exitStatus) {
       inhibitorProbe.exitSeen = true
-      root.afterInhibitorCheck(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - inhibitorProbe.startedAt, root.inhibitorTimeoutSec * 1000), inhibitorOutput.text, inhibitorErrorOutput.text)
+      root.afterInhibitorCheck(exitCode, Policy.stoppedAtDeadline(exitCode, exitStatus !== 0, Date.now() - inhibitorProbe.startedAt, root.inhibitorTimeoutSec * 1000), inhibitorOutput.text, inhibitorErrorOutput.text, inhibitorOutput.truncated)
     }
   }
 
@@ -740,13 +773,15 @@ Item {
     id: lockProcess
     property bool exitSeen: false
     command: ["timeout", "--kill-after=1s", "12s", "bash", "-c", 'request() { case $(timeout --kill-after=0.2s 2s omarchy-shell lock lock 2>/dev/null) in missing-pam) echo missing-pam; exit 3;; esac; }; ' + 'request; ' + 'for _ in $(seq 1 40); do ' + 'state=$(timeout --kill-after=0.2s 1s omarchy-shell lock status 2>/dev/null | jq -r \'if .secure == true then "secure" elif .requested == true then "locking" else "idle" end\' 2>/dev/null); ' + 'case $state in secure) echo secure; exit 0;; locking) ;; *) request;; esac; ' + 'sleep 0.2; done; echo timeout; exit 4']
-    stdout: StdioCollector {
+    stdout: FoamyBoundedCollector {
       id: lockOutput
-      waitForEnd: true
+      limit: root.outputLimit
     }
+    onStarted: lockOutput.clear()
     onExited: function (exitCode) {
       lockProcess.exitSeen = true
-      var result = String(lockOutput.text || "").trim().split("\n").pop()
+      // A reply cut at outputLimit has no last line to read: no secure lock.
+      var result = lockOutput.truncated ? "output-too-long" : String(lockOutput.text || "").trim().split("\n").pop()
       root.afterLock(exitCode === 0 && result === "secure" ? "secure" : (result || "timeout"))
     }
     // Not running without an exit: the lock couldn't start (no exited()).
@@ -762,10 +797,11 @@ Item {
   Process {
     id: suspendProcess
     property int attempt: 0
-    stderr: StdioCollector {
+    stderr: FoamyBoundedCollector {
       id: suspendError
-      waitForEnd: true
+      limit: root.outputLimit
     }
+    onStarted: suspendError.clear()
     onExited: function (exitCode, exitStatus) {
       root.settleSuspend(suspendProcess.attempt, exitCode, suspendError.text)
     }
