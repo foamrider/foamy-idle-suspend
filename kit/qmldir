@@ -1,4 +1,4 @@
-# foamy-kit 0.16.0 777a26a614426a37298f7dd9f7bf1545cbd871a51216b4406b52c57e738cf188 — do not edit; change foamy-kit and run sync
+# foamy-kit 0.17.0 777a26a614426a37298f7dd9f7bf1545cbd871a51216b4406b52c57e738cf188 — do not edit; change foamy-kit and run sync
 FoamyBoundedCollector 1.0 FoamyBoundedCollector.qml
 singleton FoamyI18n 1.0 FoamyI18n.qml
 FoamyIpc 1.0 FoamyIpc.qml
